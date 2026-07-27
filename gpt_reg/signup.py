@@ -125,6 +125,8 @@ def _build_context(
 def _resolve_proxy_url(request: SignupRequest, ctx: RunContext) -> str | None:
     from gpt_reg.proxy.format import materialize_proxy, proxy_url_for_httpx
 
+    if request.proxy_enabled is False:
+        return None
     if request.proxy:
         return proxy_url_for_httpx(materialize_proxy(request.proxy))
     return ctx.proxy_pool.acquire_url()
@@ -260,7 +262,9 @@ def run_signup(
         }
     )
     proxy_url = _resolve_proxy_url(req, ctx)
-    if proxy_url:
+    if req.proxy_enabled is False and req.proxy is not None:
+        req = req.model_copy(update={"proxy": None})
+    elif proxy_url:
         req = req.model_copy(update={"proxy": proxy_url})
 
     if mail is None:

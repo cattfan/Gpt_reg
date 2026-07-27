@@ -105,12 +105,13 @@ class BrowserPhase:
 
         password = request.password or secrets.token_urlsafe(12)[:16]
         proxy_mat = None
-        if request.proxy:
-            from gpt_reg.proxy.format import materialize_proxy
+        if request.proxy_enabled is not False:
+            if request.proxy:
+                from gpt_reg.proxy.format import materialize_proxy
 
-            proxy_mat = materialize_proxy(request.proxy)
-        elif ctx.proxy_pool:
-            proxy_mat = ctx.proxy_pool.acquire()
+                proxy_mat = materialize_proxy(request.proxy)
+            elif ctx.proxy_pool:
+                proxy_mat = ctx.proxy_pool.acquire()
 
         proxy_kw = playwright_proxy_dict(proxy_mat) or {}
         job_id = uuid.uuid4().hex[:8]

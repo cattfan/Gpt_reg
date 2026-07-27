@@ -34,6 +34,7 @@ export interface MailSourceStatus {
   configured: boolean
   balance: number
   currency: string
+  currency_divisor?: number
   price: number
   stock: number
   affordable: number

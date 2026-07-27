@@ -13,7 +13,7 @@ import { showToast } from '../composables/useToast'
 import { apiJson, apiText, postJson, presentApiError } from '../services/api'
 import { subscribeSse } from '../services/sse'
 import type {
-  Job, Limits, MailProduct, MailSourceStatus, ProfileRegion, RegistrationSource, StreamEvent,
+  Job, Limits, MailProduct, MailSourceStatus, ProfileRegion, ProxySettings, RegistrationSource, StreamEvent,
 } from '../types'
 
 const { t } = useI18n()
@@ -28,6 +28,7 @@ const sourceError = ref('')
 const sourceLoading = ref(false)
 const regMode = ref<'browser' | 'http'>('browser')
 const fallbackEnabled = ref(false)
+const proxyEnabled = ref(false)
 const headless = ref(false)
 const with2fa = ref(true)
 const concurrency = ref(1)
@@ -83,10 +84,11 @@ function elapsed(job: Job) {
   const seconds = job.browser_seconds ?? job.http_seconds
   return seconds == null ? '' : `${seconds.toFixed(1)}s`
 }
-function formatMoney(cents: number | undefined, currency = 'USD') {
-  if (cents == null) return '-'
-  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(cents / 100) }
-  catch { return `$${(cents / 100).toFixed(2)}` }
+function formatMoney(amount: number | undefined, currency = 'USD', divisor = 100) {
+  if (amount == null) return '-'
+  const value = amount / divisor
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 3 }).format(value) }
+  catch { return `$${new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(value)}` }
 }
 function scheduleRefresh() {
   if (refreshTimer) return
@@ -116,6 +118,12 @@ async function selectSource(next: RegistrationSource) {
   productId.value = ''
   if (next !== 'outlook') await refreshMailStatus()
 }
+function updateProxyEnabled(event: Event) {
+  proxyEnabled.value = (event.target as HTMLInputElement).checked
+  if (source.value === 'outlook') return
+  mailStatus.value = null
+  void refreshMailStatus()
+}
 async function refreshMailStatus() {
   if (source.value === 'outlook') return
   const requestedSource = source.value
@@ -123,7 +131,8 @@ async function refreshMailStatus() {
   sourceLoading.value = true
   sourceError.value = ''
   try {
-    const status = await apiJson<MailSourceStatus>(`/api/mail-sources/status?source=${requestedSource}`)
+    const query = new URLSearchParams({ source: requestedSource, proxy_enabled: String(proxyEnabled.value) })
+    const status = await apiJson<MailSourceStatus>(`/api/mail-sources/status?${query}`)
     if (request !== sourceRequest || source.value !== requestedSource) return
     mailStatus.value = { ...status, products: status.products || [] }
     if (status.products?.length) {
@@ -147,6 +156,7 @@ async function startBatch() {
       profile_region: profileRegion.value,
       reg_mode: regMode.value,
       fallback_enabled: fallbackEnabled.value,
+      proxy_enabled: proxyEnabled.value,
       headless: headless.value,
       with_2fa: with2fa.value,
       concurrency: concurrency.value,
@@ -178,7 +188,7 @@ async function retryJobs(jobIds?: string[]) {
   try {
     const result = await postJson<{ job_ids: string[] }>('/api/jobs/retry', {
       headless: headless.value, with_2fa: with2fa.value, reg_mode: regMode.value,
-      fallback_enabled: fallbackEnabled.value, concurrency: concurrency.value,
+      fallback_enabled: fallbackEnabled.value, proxy_enabled: proxyEnabled.value, concurrency: concurrency.value,
       ...(jobIds ? { job_ids: jobIds } : {}),
     })
     showToast(t('toast.retrying', { count: result.job_ids.length }), result.job_ids.length ? 'success' : 'default')
@@ -242,10 +252,13 @@ watch(exportFormat, () => { if (successCount.value) void refreshExport() })
 onMounted(async () => {
   unsubscribe = subscribeSse('registration', handleEvent)
   try {
-    const [loadedLimits, settings] = await Promise.all([
-      apiJson<Limits>('/api/limits'), apiJson<Record<string, string | null>>('/api/settings'),
+    const [loadedLimits, settings, proxies] = await Promise.all([
+      apiJson<Limits>('/api/limits'),
+      apiJson<Record<string, string | null>>('/api/settings'),
+      apiJson<ProxySettings>('/api/proxies'),
     ])
     limits.value = loadedLimits
+    proxyEnabled.value = proxies.enabled
     const savedSource = settings['reg.source'] as RegistrationSource
     source.value = ['outlook', 'gmail_smsbower', 'gmail_accstack'].includes(savedSource) ? savedSource : 'outlook'
     if (!concurrencyOptions.value.includes(concurrency.value)) concurrency.value = concurrencyOptions.value[0] || 1
@@ -300,8 +313,8 @@ onBeforeUnmount(() => {
               <button class="icon-btn source-refresh" type="button" :title="t('common.refresh')" :aria-label="t('common.refresh')" :disabled="sourceLoading" @click="refreshMailStatus"><RefreshCw :size="16" :class="{ spinning: sourceLoading }" /></button>
             </div>
             <div class="source-status-strip" :class="{ unavailable: !mailStatus?.configured || sourceError }">
-              <div><span>{{ t('settings.balance') }}</span><strong>{{ mailStatus ? formatMoney(mailStatus.balance, mailStatus.currency) : '-' }}</strong></div>
-              <div><span>{{ t('registration.price') }}</span><strong>{{ mailStatus ? formatMoney(sourcePrice, mailStatus.currency) : '-' }}</strong></div>
+              <div><span>{{ t('settings.balance') }}</span><strong>{{ mailStatus ? formatMoney(mailStatus.balance, mailStatus.currency, mailStatus.currency_divisor) : '-' }}</strong></div>
+              <div><span>{{ t('registration.price') }}</span><strong>{{ mailStatus ? formatMoney(sourcePrice, mailStatus.currency, mailStatus.currency_divisor) : '-' }}</strong></div>
               <div><span>{{ t('settings.inventory') }}</span><strong>{{ mailStatus?.configured ? sourceStock : '-' }}</strong></div>
               <div><span>{{ t('settings.affordable') }}</span><strong>{{ mailStatus?.configured ? sourceAffordable : '-' }}</strong></div>
             </div>
@@ -323,6 +336,7 @@ onBeforeUnmount(() => {
             <label class="switch-control"><input v-model="headless" type="checkbox" :disabled="regMode === 'http'"><span /><b>{{ t('registration.headless') }}</b></label>
             <label class="switch-control"><input v-model="with2fa" type="checkbox"><span /><b>{{ t('registration.twofa') }}</b></label>
             <label class="switch-control"><input v-model="fallbackEnabled" data-testid="engine-fallback" type="checkbox"><span /><b>{{ t('registration.engineFallback') }}</b></label>
+            <label class="switch-control"><input :checked="proxyEnabled" data-testid="registration-proxy-enabled" type="checkbox" @change="updateProxyEnabled"><span /><b>{{ t('settings.useProxy') }}</b></label>
             <label class="select-field"><span>{{ t('registration.concurrency') }}</span><select v-model.number="concurrency"><option v-for="value in concurrencyOptions" :key="value" :value="value">{{ value }}</option></select></label>
           </div>
           <div class="action-row">

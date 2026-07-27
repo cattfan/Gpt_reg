@@ -48,6 +48,12 @@ describe('UI regression contracts', () => {
     expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 1100px\)[\s\S]*\.check-input-panel \.btn\s*\{[^}]*white-space:\s*nowrap/s)
   })
 
+  it('keeps the API key input and eye button joined without overflow', () => {
+    expect(css).toMatch(/\.field > \.password-field\s*\{[^}]*gap:\s*0/s)
+    expect(css).toMatch(/\.password-field input\s*\{[^}]*min-width:\s*0[^}]*flex:\s*1[^}]*border-radius:\s*6px 0 0 6px/s)
+    expect(css).toMatch(/\.password-field button\s*\{[^}]*border-radius:\s*0 6px 6px 0/s)
+  })
+
   it('compacts the rail without hiding language selection on narrow tablets', () => {
     expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 900px\)[\s\S]*\.app-shell\s*,\s*\.app-shell\.rail-collapsed\s*\{[^}]*grid-template-columns:\s*64px\s+minmax\(0,\s*1fr\)/s)
     expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 900px\)[\s\S]*\.mobile-locale\s*\{[^}]*display:\s*flex/s)

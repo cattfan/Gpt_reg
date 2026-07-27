@@ -10,12 +10,13 @@ import { confirmAction } from '../composables/useConfirm'
 import { showToast } from '../composables/useToast'
 import { apiJson, apiText, postJson, presentApiError } from '../services/api'
 import { subscribeSse } from '../services/sse'
-import type { CheckRecord, Limits, StreamEvent } from '../types'
+import type { CheckRecord, Limits, ProxySettings, StreamEvent } from '../types'
 
 const { t } = useI18n()
 const input = ref('')
 const checks = ref<CheckRecord[]>([])
 const concurrency = ref(5)
+const proxyEnabled = ref(false)
 const concurrencyOptions = ref([1, 2, 5, 10, 20, 50, 100, 200])
 const search = ref('')
 const statusFilter = ref('all')
@@ -90,7 +91,9 @@ async function startChecks() {
   if (!lineCount.value) return showToast(t('common.noData'), 'danger')
   loading.value = true
   try {
-    const result = await postJson<{ check_ids: string[] }>('/api/checks/start', { input: lines(input.value).join('\n'), concurrency: concurrency.value })
+    const result = await postJson<{ check_ids: string[] }>('/api/checks/start', {
+      input: lines(input.value).join('\n'), concurrency: concurrency.value, proxy_enabled: proxyEnabled.value,
+    })
     showToast(t('toast.started', { count: result.check_ids.length }), result.check_ids.length ? 'success' : 'default')
     scheduleRefresh()
   } catch (error) { showToast(message(error), 'danger') }
@@ -102,7 +105,9 @@ async function stopChecks() {
 }
 async function retryChecks() {
   try {
-    const result = await postJson<{ check_ids: string[] }>('/api/checks/retry', { concurrency: concurrency.value })
+    const result = await postJson<{ check_ids: string[] }>('/api/checks/retry', {
+      concurrency: concurrency.value, proxy_enabled: proxyEnabled.value,
+    })
     showToast(t('toast.retrying', { count: result.check_ids.length }), result.check_ids.length ? 'success' : 'default')
     scheduleRefresh()
   } catch (error) { showToast(message(error), 'danger') }
@@ -160,7 +165,10 @@ function handleEvent(event: StreamEvent) {
 onMounted(async () => {
   unsubscribe = subscribeSse('checks', handleEvent)
   try {
-    const values = await apiJson<Limits>('/api/limits')
+    const [values, proxies] = await Promise.all([
+      apiJson<Limits>('/api/limits'), apiJson<ProxySettings>('/api/proxies'),
+    ])
+    proxyEnabled.value = proxies.enabled
     concurrencyOptions.value = values.check_concurrency_choices.filter((value) => value <= values.max_check)
     if (!concurrencyOptions.value.includes(concurrency.value)) concurrency.value = concurrencyOptions.value[0] || 1
   } catch (error) { showToast(message(error), 'danger') }
@@ -179,6 +187,7 @@ onBeforeUnmount(() => { unsubscribe(); window.clearInterval(pollTimer); window.c
         <div class="form-stack">
           <textarea v-model="input" class="mono-input check-input" spellcheck="false" placeholder="mail|pass|2fa&#10;mail|pass|2fa|email|mailpass|refresh|client_id" />
           <div class="options-row">
+            <label class="switch-control"><input v-model="proxyEnabled" data-testid="checks-proxy-enabled" type="checkbox"><span /><b>{{ t('settings.useProxy') }}</b></label>
             <label class="select-field"><span>{{ t('checks.concurrency') }}</span><select v-model.number="concurrency"><option v-for="value in concurrencyOptions" :key="value" :value="value">{{ value }}</option></select></label>
           </div>
           <div class="action-row">

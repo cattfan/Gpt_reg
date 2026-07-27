@@ -16,13 +16,16 @@ def _response(status: int, payload, *, request: httpx.Request) -> httpx.Response
 def _check_alias(failures: list[str]) -> None:
     from gpt_reg.mail.alias import gmail_alias
 
-    first = gmail_alias("base@gmail.com", seed="job-a", index=1)
-    again = gmail_alias("base@gmail.com", seed="job-a", index=1)
-    second = gmail_alias("base@gmail.com", seed="job-a", index=2)
+    first = gmail_alias("nguyenvana@gmail.com", seed="job-a", index=1)
+    again = gmail_alias("nguyenvana@gmail.com", seed="job-a", index=1)
+    second = gmail_alias("nguyenvana@gmail.com", seed="job-a", index=2)
     if first != again or first == second:
         failures.append("gmail alias is not deterministic/unique by index")
-    if not first.startswith("base+") or not first.endswith("@gmail.com"):
+    if not first.startswith("nguyenvana+") or not first.endswith("@gmail.com"):
         failures.append(f"gmail alias format is invalid: {first!r}")
+    replaced = gmail_alias("nguyenvana+oldalias@gmail.com", seed="job-b", index=1)
+    if not replaced.startswith("nguyenvana+") or "+oldalias+" in replaced:
+        failures.append(f"gmail alias did not preserve the original local part: {replaced!r}")
     suffix = first.split("+", 1)[1].split("@", 1)[0]
     if len(suffix) != 6 or not suffix.isalnum() or suffix.lower() != suffix:
         failures.append(f"gmail alias suffix is invalid: {suffix!r}")
@@ -131,7 +134,7 @@ def _check_accstack(failures: list[str]) -> None:
         if path.endswith("/me"):
             return _response(
                 200,
-                {"status": "success", "username": "fixture", "balance": 12500, "discount": 5},
+                {"status": "success", "username": "fixture", "balance": 4895, "discount": 5},
                 request=request,
             )
         if path.endswith("/products"):
@@ -140,9 +143,10 @@ def _check_accstack(failures: list[str]) -> None:
                 {
                     "status": "success",
                     "products": [
-                        {"id": 5, "name": "Gmail OpenAI", "kind": "rent", "price": 50, "stock": 120, "min": 1, "max": 1, "description": "Receive OTP"},
+                        {"id": 8, "name": "Gmail Amazon", "kind": "rent", "price": 27, "stock": 3948, "min": 1, "max": 1, "description": "Receive Amazon OTP"},
+                        {"id": 5, "name": "Gmail ChatGPT", "kind": "rent", "price": 34, "stock": 237, "min": 1, "max": 1, "description": "Receive ChatGPT OTP"},
                         {"id": 1, "name": "Hotmail Trusted", "kind": "buy", "price": 20, "stock": 30},
-                        {"id": 8, "name": "Instagram mailbox", "kind": "rent", "price": 10, "stock": 20},
+                        {"id": 9, "name": "Instagram mailbox", "kind": "rent", "price": 10, "stock": 20},
                     ],
                 },
                 request=request,
@@ -169,10 +173,12 @@ def _check_accstack(failures: list[str]) -> None:
         sleep=lambda _seconds: None,
     )
     status = provider.status()
-    if (status.balance, status.price, status.stock, status.affordable) != (12500, 50, 120, 250):
+    if (status.balance, status.price, status.stock, status.affordable) != (4895, 34, 237, 143):
         failures.append(f"AccStack status normalization is wrong: {status!r}")
-    if len(status.products) != 1 or status.products[0].id != "5":
-        failures.append(f"AccStack Gmail product filtering is wrong: {status.products!r}")
+    if status.currency_divisor != 1000:
+        failures.append(f"AccStack currency divisor is wrong: {status.currency_divisor!r}")
+    if len(status.products) != 2 or status.products[0].id != "5":
+        failures.append(f"AccStack Gmail product filtering/priority is wrong: {status.products!r}")
     rental = provider.rent(product_id="5")
     if rental.external_id != "ORDER-1" or rental.base_email != "base@gmail.com":
         failures.append(f"AccStack rental is wrong: {rental!r}")

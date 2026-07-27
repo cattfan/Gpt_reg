@@ -34,6 +34,8 @@ class SignupRequest(BaseModel):
     headless: bool = False
     keep_browser_open: bool = False
     proxy: str | None = None
+    # None giữ hành vi runtime cũ; False là quyết định ép kết nối trực tiếp.
+    proxy_enabled: bool | None = None
     otp_timeout_seconds: float = Field(default=180.0, ge=10)
     otp_poll_interval_seconds: float = Field(default=2.0, ge=0.5)
     user_agent: str = Field(default=WINDOWS_USER_AGENT)

@@ -31,10 +31,16 @@ const integrations: Array<{ id: IntegrationId; source: RegistrationSource; setti
 const selectedProxyCount = computed(() => proxyItems.value.filter((item) => item.selected).length)
 
 function message(error: unknown) { return presentApiError(error, t) }
-function formatMoney(cents: number | undefined, currency = 'USD') {
-  if (cents == null) return '-'
-  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(cents / 100) }
-  catch { return `$${(cents / 100).toFixed(2)}` }
+function formatMoney(amount: number | undefined, currency = 'USD', divisor = 100) {
+  if (amount == null) return '-'
+  const value = amount / divisor
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 3 }).format(value) }
+  catch { return `$${new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(value)}` }
+}
+function updateIntegrationKey(id: IntegrationId, event: Event) {
+  const value = (event.target as HTMLInputElement).value
+  integrationKeys.value[id] = value
+  if (!value.trim()) showIntegrationKey.value[id] = false
 }
 function updateProxyText(value: string) {
   const previous = new Map(proxyItems.value.map((item) => [item.value, item.selected]))
@@ -81,6 +87,7 @@ async function saveIntegration(id: IntegrationId) {
     await postJson('/api/settings', { [definition.setting]: key })
     hasIntegrationKey.value[id] = true
     integrationKeys.value[id] = ''
+    showIntegrationKey.value[id] = false
     showToast(t('toast.saved'), 'success')
     await refreshIntegration(id, false)
   } catch (error) { showToast(message(error), 'danger') }
@@ -138,8 +145,8 @@ onMounted(async () => {
           <form class="integration-body" @submit.prevent="saveIntegration(integration.id)">
             <input type="text" name="username" autocomplete="username" :value="integration.id" hidden>
             <div class="integration-metrics">
-              <div><span>{{ t('settings.balance') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.balance, integrationStatus[integration.id]?.currency) : '-' }}</strong></div>
-              <div><span>{{ t('settings.price') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.price, integrationStatus[integration.id]?.currency) : '-' }}</strong></div>
+              <div><span>{{ t('settings.balance') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.balance, integrationStatus[integration.id]?.currency, integrationStatus[integration.id]?.currency_divisor) : '-' }}</strong></div>
+              <div><span>{{ t('settings.price') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.price, integrationStatus[integration.id]?.currency, integrationStatus[integration.id]?.currency_divisor) : '-' }}</strong></div>
               <div><span>{{ t('settings.inventory') }}</span><strong>{{ integrationStatus[integration.id]?.stock ?? '-' }}</strong></div>
               <div><span>{{ t('settings.affordable') }}</span><strong>{{ integrationStatus[integration.id]?.affordable ?? '-' }}</strong></div>
             </div>
@@ -147,8 +154,8 @@ onMounted(async () => {
               <label class="field">
                 <span><KeyRound :size="14" />{{ t('settings.apiKey') }}</span>
                 <span class="password-field">
-                  <input v-model="integrationKeys[integration.id]" :data-testid="`${integration.id}-api-key`" :type="showIntegrationKey[integration.id] ? 'text' : 'password'" autocomplete="new-password" :placeholder="hasIntegrationKey[integration.id] ? '••••••••••••' : `${t(`settings.${integration.id}`)} API key`">
-                  <button type="button" :title="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" :aria-label="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" @click="showIntegrationKey[integration.id] = !showIntegrationKey[integration.id]"><EyeOff v-if="showIntegrationKey[integration.id]" :size="16" /><Eye v-else :size="16" /></button>
+                  <input :value="integrationKeys[integration.id]" :data-testid="`${integration.id}-api-key`" :type="showIntegrationKey[integration.id] ? 'text' : 'password'" autocomplete="new-password" :placeholder="hasIntegrationKey[integration.id] ? '••••••••••••' : `${t(`settings.${integration.id}`)} API key`" @input="updateIntegrationKey(integration.id, $event)">
+                  <button :data-testid="`${integration.id}-api-key-toggle`" type="button" :title="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" :aria-label="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" :disabled="!integrationKeys[integration.id].trim()" @click="showIntegrationKey[integration.id] = !showIntegrationKey[integration.id]"><EyeOff v-if="showIntegrationKey[integration.id]" :size="16" /><Eye v-else :size="16" /></button>
                 </span>
               </label>
               <button class="btn primary" type="submit" :disabled="savingKey[integration.id] || !integrationKeys[integration.id].trim()"><Save :size="16" />{{ t('settings.saveKey') }}</button>

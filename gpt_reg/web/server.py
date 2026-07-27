@@ -25,7 +25,7 @@ from gpt_reg.mail.rental import MailRentalError
 from gpt_reg.mail.smsbower_rental import SmsBowerMailRentalProvider
 from gpt_reg.proxy.format import materialize_proxy
 from gpt_reg.proxy.pool import ProxyPool
-from gpt_reg.signup import _build_context
+from gpt_reg.signup import _build_context  # kept for compatibility; job API no longer calls it
 from gpt_reg.web import export
 from gpt_reg.web.jobs.check_manager import (
     CHECK_CONCURRENCY_CHOICES,
@@ -83,10 +83,10 @@ def _setting_enabled(key: str) -> bool:
     )
 
 
-def _runtime_proxy_pool() -> ProxyPool:
+def _runtime_proxy_pool(enabled: bool | None = None) -> ProxyPool:
     return ProxyPool.from_records(
         proxy_repo.list_all(),
-        enabled=_setting_enabled("proxy.enabled"),
+        enabled=_setting_enabled("proxy.enabled") if enabled is None else enabled,
     )
 
 
@@ -151,7 +151,7 @@ MAIL_RENTAL_SOURCES = ("gmail_smsbower", "gmail_accstack")
 
 
 @app.get("/api/mail-sources/status")
-def mail_source_status(source: str) -> JSONResponse:
+def mail_source_status(source: str, proxy_enabled: bool | None = None) -> JSONResponse:
     if source not in MAIL_RENTAL_SOURCES:
         raise HTTPException(status_code=400, detail="unsupported mail source")
     key_name = (
@@ -171,7 +171,7 @@ def mail_source_status(source: str) -> JSONResponse:
             }
         )
     try:
-        proxy_url = _runtime_proxy_pool().acquire_url()
+        proxy_url = _runtime_proxy_pool(proxy_enabled).acquire_url()
         status = _provider_for_source(source, proxy_url=proxy_url).status()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -403,6 +403,15 @@ async def start_jobs(payload: dict[str, Any]) -> dict[str, Any]:
     profile_region = _clean_profile_region(payload.get("profile_region"))
     settings_repo.set("reg.source", source)
     concurrency = clamp_concurrency(payload.get("concurrency"), reg_mode, fallback_enabled)
+    proxy_enabled = _json_bool(
+        payload,
+        "proxy_enabled",
+        default=_setting_enabled("proxy.enabled"),
+    )
+    try:
+        pool = _runtime_proxy_pool(proxy_enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if source == "outlook":
         text = str(payload.get("input") or "")
         combos = [line.strip() for line in text.splitlines() if line.strip()]
@@ -413,12 +422,12 @@ async def start_jobs(payload: dict[str, Any]) -> dict[str, Any]:
                 combos=combos,
                 headless=headless,
                 jobs_repo=jobs_repo,
-                ctx=_build_context(),
                 with_2fa=with_2fa,
                 reg_mode=reg_mode,
                 fallback_enabled=fallback_enabled,
                 concurrency=concurrency,
                 profile_region=profile_region,
+                proxy_pool=pool,
             )
         except InvalidComboError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid combo: {exc}") from exc
@@ -432,7 +441,6 @@ async def start_jobs(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     try:
-        pool = _runtime_proxy_pool()
         status = _provider_for_source(source, proxy_url=pool.acquire_url()).status()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -519,6 +527,11 @@ async def retry_jobs(payload: dict[str, Any]) -> dict[str, Any]:
     fallback_enabled = _json_bool(payload, "fallback_enabled")
     headless = _json_bool(payload, "headless")
     with_2fa = _json_bool(payload, "with_2fa")
+    proxy_enabled = _json_bool(
+        payload,
+        "proxy_enabled",
+        default=_setting_enabled("proxy.enabled"),
+    )
     concurrency = clamp_concurrency(
         payload.get("concurrency"), retry_mode, fallback_enabled
     )
@@ -538,9 +551,8 @@ async def retry_jobs(payload: dict[str, Any]) -> dict[str, Any]:
             detail="retry Hotmail/Outlook and Gmail in separate batches",
         )
     try:
+        pool = _runtime_proxy_pool(proxy_enabled)
         if gmail_targets:
-            pool = _runtime_proxy_pool()
-
             def provider_factory(source: str):
                 return _provider_for_source(source, proxy_url=pool.acquire_url())
 
@@ -560,12 +572,12 @@ async def retry_jobs(payload: dict[str, Any]) -> dict[str, Any]:
                 combos=[],
                 headless=headless,
                 jobs_repo=jobs_repo,
-                ctx=_build_context(),
                 with_2fa=with_2fa,
                 reg_mode=retry_mode,
                 fallback_enabled=fallback_enabled,
                 concurrency=concurrency,
                 job_ids=[str(row["id"]) for row in outlook_targets],
+                proxy_pool=pool,
             )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -646,7 +658,11 @@ async def start_checks(payload: dict[str, Any]) -> dict[str, Any]:
     concurrency = clamp_check_concurrency(payload.get("concurrency"))
     try:
         records = proxy_repo.list_all()
-        proxy_enabled = _setting_enabled("proxy.enabled")
+        proxy_enabled = _json_bool(
+            payload,
+            "proxy_enabled",
+            default=_setting_enabled("proxy.enabled"),
+        )
         ProxyPool.from_records(records, enabled=proxy_enabled)
         ids = check_manager.start_batch(
             combos=combos,
@@ -685,7 +701,11 @@ async def retry_checks(payload: dict[str, Any]) -> dict[str, Any]:
     if not targets:
         return {"check_ids": []}
     records = proxy_repo.list_all()
-    proxy_enabled = _setting_enabled("proxy.enabled")
+    proxy_enabled = _json_bool(
+        payload,
+        "proxy_enabled",
+        default=_setting_enabled("proxy.enabled"),
+    )
     try:
         ProxyPool.from_records(records, enabled=proxy_enabled)
         ids = check_manager.start_batch(

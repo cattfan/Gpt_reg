@@ -29,6 +29,7 @@ from gpt_reg.mail.providers import build_request_from_combo
 from gpt_reg.mail.rental import MailRental, MailRentalProvider
 from gpt_reg.models import SignupRequest
 from gpt_reg.profile_identity import generate_profile_identity
+from gpt_reg.proxy.pool import ProxyPool
 from gpt_reg.signup import _build_context, run_signup
 from gpt_reg.web.jobs.rental_coordinator import (
     RentalCoordinator,
@@ -194,6 +195,7 @@ class RegJobManager:
         concurrency: int = 1,
         profile_region: str = "vi",
         job_ids: list[str] | None = None,
+        proxy_pool: ProxyPool | None = None,
     ) -> list[str]:
         """Tạo job rồi chạy bằng pool `concurrency` worker.
 
@@ -285,7 +287,15 @@ class RegJobManager:
         for index in range(workers):
             threading.Thread(
                 target=self._worker,
-                args=(pending, headless, with_2fa, reg_mode, fallback_enabled, jobs_repo),
+                args=(
+                    pending,
+                    headless,
+                    with_2fa,
+                    reg_mode,
+                    fallback_enabled,
+                    jobs_repo,
+                    proxy_pool,
+                ),
                 name=f"reg-worker-{index}",
                 daemon=True,
             ).start()
@@ -299,6 +309,7 @@ class RegJobManager:
         reg_mode: str,
         fallback_enabled: bool,
         jobs_repo,
+        proxy_pool: ProxyPool | None,
     ) -> None:
         try:
             while True:
@@ -316,6 +327,7 @@ class RegJobManager:
                     self._run_one(
                         jobs_repo, row, headless=headless, with_2fa=with_2fa,
                         reg_mode=reg_mode, fallback_enabled=fallback_enabled,
+                        proxy_pool=proxy_pool,
                     )
                 except Exception as exc:
                     # Worker chết lặng lẽ sẽ để job treo ở "running" vĩnh viễn.
@@ -653,6 +665,8 @@ class RegJobManager:
         self, jobs_repo, row: dict[str, Any], job_id: str, *,
         headless: bool, with_2fa: bool, reg_mode: str, log,
         mail_override=None,
+        proxy_url: str | None = None,
+        proxy_enabled: bool | None = None,
     ):
         identity = jobs_repo.ensure_fingerprint_identity(job_id)
         fingerprint_seed = str(identity["fingerprint_seed"])
@@ -694,6 +708,9 @@ class RegJobManager:
             password = saved_password
             outlook_combo = None
             mail_provider = str(row.get("mail_mode") or "gmail_smsbower")
+        if mail_override is not None and proxy_enabled is None:
+            proxy_url = getattr(mail_override, "proxy_url", None)
+            proxy_enabled = bool(proxy_url)
         req = SignupRequest(
             email=email,
             name=str(row.get("profile_name") or "ChatGPT User"),
@@ -708,7 +725,8 @@ class RegJobManager:
             browser_fingerprint=browser_fingerprint,
             user_agent=profile.user_agent,
             impersonate=profile.impersonate,
-            proxy=getattr(mail_override, "proxy_url", None),
+            proxy=proxy_url,
+            proxy_enabled=proxy_enabled,
         )
 
         def on_account_created(created_password: str) -> None:
@@ -731,6 +749,7 @@ class RegJobManager:
         self, jobs_repo, row: dict[str, Any], *, headless: bool, with_2fa: bool,
         reg_mode: str, fallback_enabled: bool = False,
         mail_override=None,
+        proxy_pool: ProxyPool | None = None,
     ):
         job_id = str(row["id"])
         with self._lock:
@@ -743,6 +762,11 @@ class RegJobManager:
             jobs_repo.append_log(job_id, public_line)
             self._emit({"type": "log", "job_id": job_id, "line": public_line})
 
+        proxy_decided = mail_override is not None or proxy_pool is not None
+        proxy_url = getattr(mail_override, "proxy_url", None)
+        if mail_override is None and proxy_pool is not None:
+            proxy_url = proxy_pool.acquire_url()
+
         def attempt(attempt_row: dict[str, Any], mode: str):
             kwargs = {
                 "headless": headless,
@@ -752,6 +776,9 @@ class RegJobManager:
             }
             if mail_override is not None:
                 kwargs["mail_override"] = mail_override
+            if proxy_decided:
+                kwargs["proxy_url"] = proxy_url
+                kwargs["proxy_enabled"] = bool(proxy_url)
             return self._attempt_signup(jobs_repo, attempt_row, job_id, **kwargs)
 
         try:

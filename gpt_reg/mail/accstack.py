@@ -129,7 +129,19 @@ class AccStackMailRentalProvider:
                     description=str(raw.get("description") or ""),
                 )
             )
-        products.sort(key=lambda product: (product.price, product.name.lower(), product.id))
+        products.sort(
+            key=lambda product: (
+                0
+                if any(
+                    marker in f"{product.name} {product.description}".casefold()
+                    for marker in ("chatgpt", "openai")
+                )
+                else 1,
+                product.price,
+                product.name.casefold(),
+                product.id,
+            )
+        )
         if not products:
             return MailSourceStatus(
                 configured=True,
@@ -138,6 +150,7 @@ class AccStackMailRentalProvider:
                 price=0,
                 stock=0,
                 affordable=0,
+                currency_divisor=1000,
                 products=(),
             )
         primary = products[0]
@@ -148,6 +161,7 @@ class AccStackMailRentalProvider:
             price=primary.price,
             stock=primary.stock,
             affordable=balance // primary.price,
+            currency_divisor=1000,
             products=tuple(products),
         )
 

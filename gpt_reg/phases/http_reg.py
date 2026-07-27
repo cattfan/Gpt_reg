@@ -1352,7 +1352,10 @@ class HttpRegPhase:
     ) -> BrowserHandoff:
         # Materialize proxy giống browser phase nếu chưa có.
         req = request
-        if not req.proxy and ctx.proxy_pool:
+        if req.proxy_enabled is False:
+            if req.proxy is not None:
+                req = request.model_copy(update={"proxy": None})
+        elif not req.proxy and ctx.proxy_pool:
             proxy_url = ctx.proxy_pool.acquire_url()
             if proxy_url:
                 req = request.model_copy(update={"proxy": proxy_url})

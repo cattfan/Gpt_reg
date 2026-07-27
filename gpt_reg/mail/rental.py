@@ -52,6 +52,7 @@ class MailSourceStatus:
     price: int
     stock: int
     affordable: int
+    currency_divisor: int = 100
     products: tuple[MailProduct, ...] = ()
 
 

@@ -246,6 +246,77 @@ describe('operational views', () => {
     expect(JSON.parse(String(retryCall?.[1]?.body))).toMatchObject({ fallback_enabled: true })
   })
 
+  it('uses the per-run proxy choice for registration status, start and retry', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/limits')) return ok({ concurrency_choices: [1], max_browser: 1, max_http: 1, check_concurrency_choices: [1], max_check: 1 })
+      if (url.includes('/api/settings')) return ok({ 'reg.source': 'outlook' })
+      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: [], selected: 0, total: 0 })
+      if (url.endsWith('/api/jobs/status')) return ok({ running: false })
+      if (url.endsWith('/api/jobs')) return ok([{ id: 'job-error', email: 'failed@example.com', status: 'error', error: 'failed' }])
+      if (url.includes('/api/mail-sources/status')) return ok({ configured: true, balance: 500, currency: 'USD', price: 50, stock: 10, affordable: 10, products: [] })
+      if (url.endsWith('/api/jobs/start')) return ok({ job_ids: ['new-job'] })
+      if (url.endsWith('/api/jobs/retry')) return ok({ job_ids: ['job-error'] })
+      return ok([])
+    }))
+    const wrapper = mountView(RegistrationView)
+    await flushPromises()
+
+    const proxyToggle = wrapper.get('[data-testid="registration-proxy-enabled"]')
+    expect((proxyToggle.element as HTMLInputElement).checked).toBe(true)
+    expect(proxyToggle.element.parentElement?.textContent).toContain('Dùng proxy')
+
+    await wrapper.get('[data-testid="source-gmail_smsbower"]').trigger('click')
+    await flushPromises()
+    const statusCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes('/api/mail-sources/status'))
+    expect(String(statusCall?.[0])).toContain('source=gmail_smsbower')
+    expect(String(statusCall?.[0])).toContain('proxy_enabled=true')
+
+    await proxyToggle.setValue(false)
+    await flushPromises()
+    const statusCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/mail-sources/status'))
+    expect(String(statusCalls.at(-1)?.[0])).toContain('proxy_enabled=false')
+
+    await wrapper.get('[data-testid="source-outlook"]').trigger('click')
+    await wrapper.get('[data-testid="outlook-input"]').setValue('mail@example.com|pass|refresh|client')
+    await wrapper.get('[data-testid="registration-run"]').trigger('click')
+    await flushPromises()
+    const startCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/jobs/start'))
+    expect(JSON.parse(String(startCall?.[1]?.body))).toMatchObject({ proxy_enabled: false })
+
+    await proxyToggle.setValue(true)
+    await wrapper.get('[data-testid="job-retry-job-error"]').trigger('click')
+    await flushPromises()
+    const retryCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/jobs/retry'))
+    expect(JSON.parse(String(retryCall?.[1]?.body))).toMatchObject({ proxy_enabled: true })
+  })
+
+  it('formats AccStack balance and price with its currency divisor', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/limits')) return ok({ concurrency_choices: [1], max_browser: 1, max_http: 1, check_concurrency_choices: [1], max_check: 1 })
+      if (url.includes('/api/settings')) return ok({ 'reg.source': 'gmail_accstack' })
+      if (url.endsWith('/api/proxies')) return ok({ enabled: false, items: [], selected: 0, total: 0 })
+      if (url.includes('/api/mail-sources/status')) return ok({
+        configured: true, balance: 4895, currency: 'USD', currency_divisor: 1000,
+        price: 34, stock: 237, affordable: 143, products: [{ id: '5', name: 'Gmail', price: 34, stock: 237 }],
+      })
+      if (url.endsWith('/api/jobs/status')) return ok({ running: false })
+      if (url.endsWith('/api/jobs')) return ok([])
+      return ok([])
+    }))
+    const registration = mountView(RegistrationView)
+    await flushPromises()
+
+    expect(registration.text()).toContain('$4.895')
+    expect(registration.text()).toContain('$0.034')
+
+    const settings = mountView(SettingsView)
+    await flushPromises()
+    expect(settings.text()).toContain('$4.895')
+    expect(settings.text()).toContain('$0.034')
+  })
+
   it('renders searchable account check results', async () => {
     const wrapper = mountView(CheckAccountsView)
     await flushPromises()
@@ -306,6 +377,37 @@ describe('operational views', () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('plus@example.com|PlusPass|PLUS2FA')
   })
 
+  it('uses the per-run proxy choice for check start and retry', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/limits')) return ok({ concurrency_choices: [1], max_browser: 1, max_http: 1, check_concurrency_choices: [1], max_check: 1 })
+      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: [], selected: 0, total: 0 })
+      if (url.endsWith('/api/checks/start')) return ok({ check_ids: ['check-1'] })
+      if (url.endsWith('/api/checks/retry')) return ok({ check_ids: ['check-2'] })
+      if (url.endsWith('/api/checks')) return ok([])
+      return ok([])
+    }))
+    const wrapper = mountView(CheckAccountsView)
+    await flushPromises()
+
+    const proxyToggle = wrapper.get('[data-testid="checks-proxy-enabled"]')
+    expect((proxyToggle.element as HTMLInputElement).checked).toBe(true)
+    expect(proxyToggle.element.parentElement?.textContent).toContain('Dùng proxy')
+
+    await wrapper.get('textarea').setValue('mail@example.com|pass|2fa')
+    await proxyToggle.setValue(false)
+    await wrapper.get('[data-testid="checks-run"]').trigger('click')
+    await flushPromises()
+    const startCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/checks/start'))
+    expect(JSON.parse(String(startCall?.[1]?.body))).toMatchObject({ proxy_enabled: false })
+
+    await proxyToggle.setValue(true)
+    await wrapper.get('.check-results-panel .panel-actions button').trigger('click')
+    await flushPromises()
+    const retryCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/checks/retry'))
+    expect(JSON.parse(String(retryCall?.[1]?.body))).toMatchObject({ proxy_enabled: true })
+  })
+
   it('renders integrations and selectable random proxy settings without Appearance', async () => {
     const wrapper = mountView(SettingsView)
     await flushPromises()
@@ -319,6 +421,24 @@ describe('operational views', () => {
     expect(wrapper.text()).toContain('Proxy')
     expect(wrapper.text()).not.toContain('Giao diện')
     expect(wrapper.text()).not.toContain('Round robin')
+  })
+
+  it('only reveals an integration API key when the input is non-empty', async () => {
+    const wrapper = mountView(SettingsView)
+    await flushPromises()
+
+    const input = wrapper.get('[data-testid="smsbower-api-key"]')
+    const toggle = wrapper.get('[data-testid="smsbower-api-key-toggle"]')
+    expect(input.attributes('type')).toBe('password')
+    expect(toggle.attributes('disabled')).toBeDefined()
+
+    await input.setValue('secret-key')
+    expect(toggle.attributes('disabled')).toBeUndefined()
+    await toggle.trigger('click')
+    expect(input.attributes('type')).toBe('text')
+    await input.setValue('   ')
+    expect(input.attributes('type')).toBe('password')
+    expect(toggle.attributes('disabled')).toBeDefined()
   })
 
   it('saves proxy toggle, parsed rows and selected subset', async () => {
