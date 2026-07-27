@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from gpt_reg.config import load_settings
 from gpt_reg.checker.combo import CheckComboError
 from gpt_reg.db import connect, migrate
-from gpt_reg.db.repositories import ChecksRepository, JobRepository, SettingsRepository
+from gpt_reg.db.repositories import (
+    ChecksRepository,
+    JobRepository,
+    MailRentalRepository,
+    ProxyRepository,
+    SettingsRepository,
+)
+from gpt_reg.mail.accstack import AccStackMailRentalProvider
 from gpt_reg.mail.modes import serialize_for_api
+from gpt_reg.mail.rental import MailRentalError
+from gpt_reg.mail.smsbower_rental import SmsBowerMailRentalProvider
+from gpt_reg.proxy.format import materialize_proxy
 from gpt_reg.proxy.pool import ProxyPool
 from gpt_reg.signup import _build_context
 from gpt_reg.web import export
@@ -38,6 +49,8 @@ migrate(conn)
 settings_repo = SettingsRepository(conn)
 jobs_repo = JobRepository(conn)
 checks_repo = ChecksRepository(conn)
+rentals_repo = MailRentalRepository(conn)
+proxy_repo = ProxyRepository(conn)
 # Worker chết theo process trước; job của chúng không bao giờ chạy tiếp.
 _orphans = jobs_repo.reap_orphans()
 _orphan_checks = checks_repo.reap_orphans()
@@ -51,6 +64,44 @@ check_manager = get_check_manager()
 
 app = FastAPI(title="Gpt_reg")
 STATIC = settings.root_dir / "gpt_reg" / "web" / "static"
+
+
+def _no_store(payload: Any, *, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        payload,
+        status_code=status_code,
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
+def _setting_enabled(key: str) -> bool:
+    return str(settings_repo.get(key) or "false").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _runtime_proxy_pool() -> ProxyPool:
+    return ProxyPool.from_records(
+        proxy_repo.list_all(),
+        enabled=_setting_enabled("proxy.enabled"),
+    )
+
+
+def _provider_for_source(source: str, proxy_url: str | None = None):
+    if source == "gmail_smsbower":
+        api_key = settings_repo.get("sms.smsbower.api_key")
+        if not api_key:
+            raise ValueError("SMSBower API key is not configured")
+        return SmsBowerMailRentalProvider(api_key, proxy_url=proxy_url)
+    if source == "gmail_accstack":
+        api_key = settings_repo.get("accstack.api_key")
+        if not api_key:
+            raise ValueError("AccStack API key is not configured")
+        return AccStackMailRentalProvider(api_key, proxy_url=proxy_url)
+    raise ValueError(f"unsupported mail source: {source!r}")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -96,8 +147,98 @@ async def post_settings(payload: dict[str, str]) -> dict[str, str]:
     return {"ok": "true"}
 
 
+MAIL_RENTAL_SOURCES = ("gmail_smsbower", "gmail_accstack")
+
+
+@app.get("/api/mail-sources/status")
+def mail_source_status(source: str) -> JSONResponse:
+    if source not in MAIL_RENTAL_SOURCES:
+        raise HTTPException(status_code=400, detail="unsupported mail source")
+    key_name = (
+        "sms.smsbower.api_key" if source == "gmail_smsbower" else "accstack.api_key"
+    )
+    if not settings_repo.get(key_name):
+        return _no_store(
+            {
+                "configured": False,
+                "balance": 0,
+                "currency": "USD",
+                "price": 0,
+                "stock": 0,
+                "affordable": 0,
+                "products": [],
+                "reason": f"{source} API key is not configured",
+            }
+        )
+    try:
+        proxy_url = _runtime_proxy_pool().acquire_url()
+        status = _provider_for_source(source, proxy_url=proxy_url).status()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MailRentalError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return _no_store(asdict(status))
+
+
+@app.get("/api/proxies")
+def get_proxies() -> JSONResponse:
+    items = proxy_repo.list_all()
+    return _no_store(
+        {
+            "enabled": _setting_enabled("proxy.enabled"),
+            "items": items,
+            "selected": sum(1 for item in items if item["selected"]),
+            "total": len(items),
+        }
+    )
+
+
+@app.put("/api/proxies")
+async def put_proxies(payload: dict[str, Any]) -> JSONResponse:
+    enabled = payload.get("enabled")
+    items = payload.get("items")
+    if type(enabled) is not bool:
+        raise HTTPException(status_code=400, detail="enabled must be a boolean")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="items must be a list")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            raise HTTPException(
+                status_code=400,
+                detail={"line": index, "message": "proxy row must be an object"},
+            )
+        value = item.get("value")
+        selected = item.get("selected")
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(
+                status_code=400,
+                detail={"line": index, "message": "proxy value is required"},
+            )
+        if type(selected) is not bool:
+            raise HTTPException(
+                status_code=400,
+                detail={"line": index, "message": "selected must be a boolean"},
+            )
+        try:
+            materialize_proxy(value.strip())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"line": index, "message": str(exc)},
+            ) from exc
+        normalized.append({"value": value.strip(), "selected": selected})
+    try:
+        ProxyPool.from_records(normalized, enabled=enabled)
+        proxy_repo.replace_all(normalized)
+        settings_repo.set("proxy.enabled", "true" if enabled else "false")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return get_proxies()
+
+
 @app.get("/api/sms/status")
-def sms_status() -> dict[str, Any]:
+def sms_status() -> JSONResponse:
     """Số dư + tồn kho số cho nguồn Gmail (SMSBower).
 
     Trả `configured=False` thay vì lỗi khi chưa nhập API key — UI hiển thị nhắc
@@ -105,24 +246,22 @@ def sms_status() -> dict[str, Any]:
     """
     api_key = settings_repo.get("sms.smsbower.api_key")
     if not api_key:
-        return {"configured": False, "reason": "chưa có API key SMSBower"}
+        return _no_store(
+            {"configured": False, "reason": "SMSBower API key is not configured"}
+        )
 
     from gpt_reg.sms import SmsBowerClient, SmsBowerError
 
-    proxy_url = None
     try:
-        pool = ProxyPool.from_multiline(settings_repo.get("proxy.pool") or "")
-        proxy_url = pool.acquire_url()
-    except Exception:
-        pass
-
-    client = SmsBowerClient(api_key, proxy_url=proxy_url)
-    try:
+        proxy_url = _runtime_proxy_pool().acquire_url()
+        client = SmsBowerClient(api_key, proxy_url=proxy_url)
         balance = client.get_balance()
         countries = client.get_countries()
         stocks = client.get_availability(countries=countries, limit=25)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except SmsBowerError as exc:
-        return {"configured": True, "ok": False, "error": str(exc)}
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     total = sum(s.count for s in stocks)
     cheapest = min((s for s in stocks), key=lambda s: s.cost, default=None)
@@ -149,7 +288,9 @@ def _clean_reg_mode(value: Any) -> str:
     mode = str(value or "browser").strip()
     from gpt_reg.phases.registry import available_modes
 
-    return mode if mode in available_modes() else "browser"
+    if mode not in available_modes():
+        raise HTTPException(status_code=400, detail="unsupported registration mode")
+    return mode
 
 
 def _json_bool(payload: dict[str, Any], key: str, *, default: bool = False) -> bool:
@@ -162,14 +303,38 @@ def _json_bool(payload: dict[str, Any], key: str, *, default: bool = False) -> b
     return value
 
 
-# Nguồn tài khoản mail dùng để đăng ký. "gmail" mới có phần hạ tầng SMS
-# (số dư + tồn kho); luồng tạo Gmail bằng số thuê CHƯA làm.
-REG_SOURCES = ("outlook", "gmail")
+REG_SOURCES = ("outlook", *MAIL_RENTAL_SOURCES)
+PROFILE_REGIONS = ("vi", "ko", "in")
 
 
 def _clean_source(value: Any) -> str:
     source = str(value or "outlook").strip().lower()
-    return source if source in REG_SOURCES else "outlook"
+    if source not in REG_SOURCES:
+        raise HTTPException(status_code=400, detail="unsupported registration source")
+    return source
+
+
+def _clean_profile_region(value: Any) -> str:
+    region = str(value or "vi").strip().lower()
+    if region not in PROFILE_REGIONS:
+        raise HTTPException(status_code=400, detail="unsupported profile region")
+    return region
+
+
+def _alias_limit(source: str) -> int:
+    key = (
+        "mail.smsbower.alias_limit"
+        if source == "gmail_smsbower"
+        else "mail.accstack.alias_limit"
+    )
+    raw = settings_repo.get(key) or "1"
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"invalid setting: {key}") from exc
+    if value < 1 or value > 50:
+        raise HTTPException(status_code=500, detail=f"invalid setting: {key}")
+    return value
 
 
 def _job_for_api(row: dict[str, Any]) -> dict[str, Any]:
@@ -189,6 +354,8 @@ def _job_for_api(row: dict[str, Any]) -> dict[str, Any]:
         "started_at",
         "finished_at",
         "registered_at",
+        "profile_region",
+        "alias_index",
     )
     public = {key: row.get(key) for key in public_fields if key in row}
     if public.get("error") is not None:
@@ -223,50 +390,103 @@ def export_jobs(
 
 @app.post("/api/jobs/start")
 async def start_jobs(payload: dict[str, Any]) -> dict[str, Any]:
-    text = str(payload.get("input") or "")
-    combos = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    headless = bool(payload.get("headless"))
-    with_2fa = bool(payload.get("with_2fa"))
+    headless = _json_bool(payload, "headless")
+    with_2fa = _json_bool(payload, "with_2fa")
     reg_mode = _clean_reg_mode(payload.get("reg_mode"))
     fallback_enabled = _json_bool(payload, "fallback_enabled")
     source = _clean_source(payload.get("source"))
-    if source == "gmail":
-        # Chưa có luồng tạo Gmail bằng số thuê — từ chối rõ ràng thay vì âm thầm
-        # chạy như Hotmail rồi fail ở chỗ khó hiểu.
+    profile_region = _clean_profile_region(payload.get("profile_region"))
+    settings_repo.set("reg.source", source)
+    concurrency = clamp_concurrency(payload.get("concurrency"), reg_mode, fallback_enabled)
+    if source == "outlook":
+        text = str(payload.get("input") or "")
+        combos = [line.strip() for line in text.splitlines() if line.strip()]
+        if not combos:
+            raise HTTPException(status_code=400, detail="No Hotmail/Outlook combos provided")
+        try:
+            ids = reg_manager.start_batch(
+                combos=combos,
+                headless=headless,
+                jobs_repo=jobs_repo,
+                ctx=_build_context(),
+                with_2fa=with_2fa,
+                reg_mode=reg_mode,
+                fallback_enabled=fallback_enabled,
+                concurrency=concurrency,
+                profile_region=profile_region,
+            )
+        except InvalidComboError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid combo: {exc}") from exc
+        return {"job_ids": ids, "concurrency": min(concurrency, len(ids)) if ids else 0}
+
+    rental_count = payload.get("rental_count")
+    if type(rental_count) is not int or not 1 <= rental_count <= 200:
         raise HTTPException(
             status_code=400,
-            detail="Nguồn Gmail chưa hỗ trợ đăng ký tự động — mới có phần số dư/tồn kho SMS.",
+            detail="rental_count must be an integer from 1 to 200",
         )
-    settings_repo.set("reg.source", source)
-    if not combos:
-        raise HTTPException(status_code=400, detail="Chưa có combo nào.")
-    concurrency = clamp_concurrency(payload.get("concurrency"), reg_mode, fallback_enabled)
-    ctx = _build_context()
+
     try:
-        ids = reg_manager.start_batch(
-            combos=combos,
-            headless=headless,
+        pool = _runtime_proxy_pool()
+        status = _provider_for_source(source, proxy_url=pool.acquire_url()).status()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MailRentalError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    products = {product.id: product for product in status.products}
+    requested_product = payload.get("product_id")
+    if requested_product is not None and not isinstance(requested_product, (str, int)):
+        raise HTTPException(status_code=400, detail="product_id must be a string or integer")
+    product_id = str(requested_product).strip() if requested_product is not None else ""
+    if not product_id:
+        if len(products) != 1:
+            raise HTTPException(status_code=400, detail="product_id is required")
+        product_id = next(iter(products))
+    product = products.get(product_id)
+    if product is None:
+        raise HTTPException(status_code=400, detail="mail product is unavailable")
+    affordable = status.balance // product.price if product.price else 0
+    if rental_count > min(product.stock, affordable):
+        raise HTTPException(status_code=400, detail="rental_count exceeds stock or balance")
+
+    def provider_factory():
+        return _provider_for_source(source, proxy_url=pool.acquire_url())
+
+    try:
+        rental_ids = reg_manager.start_rental_batch(
+            rental_count=rental_count,
+            provider_factory=provider_factory,
             jobs_repo=jobs_repo,
-            ctx=ctx,
+            rentals_repo=rentals_repo,
+            source=source,
+            product_id=product_id,
+            alias_limit=_alias_limit(source),
+            profile_region=profile_region,
+            headless=headless,
             with_2fa=with_2fa,
             reg_mode=reg_mode,
             fallback_enabled=fallback_enabled,
             concurrency=concurrency,
+            balance_before=status.balance,
         )
-    except InvalidComboError as exc:
-        # 400 kèm số dòng để người dùng sửa được, thay vì 500 chung chung.
-        raise HTTPException(status_code=400, detail=f"Combo sai — {exc}") from exc
-    return {"job_ids": ids, "concurrency": min(concurrency, len(ids)) if ids else 0}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "rental_ids": rental_ids,
+        "rental_count": len(rental_ids),
+        "concurrency": min(concurrency, len(rental_ids)) if rental_ids else 0,
+    }
 
 
 @app.get("/api/jobs/{job_id}/logs")
-def job_logs(job_id: str) -> dict[str, Any]:
+def job_logs(job_id: str) -> JSONResponse:
     if not jobs_repo.get(job_id):
         raise HTTPException(status_code=404, detail="job not found")
-    return {
+    return _no_store({
         "job_id": job_id,
         "lines": [sanitize_job_log_line(line) for line in jobs_repo.logs(job_id, limit=500)],
-    }
+    })
 
 
 @app.post("/api/jobs/stop")
@@ -292,19 +512,58 @@ async def retry_jobs(payload: dict[str, Any]) -> dict[str, Any]:
         return {"job_ids": []}
     retry_mode = _clean_reg_mode(payload.get("reg_mode"))
     fallback_enabled = _json_bool(payload, "fallback_enabled")
-    ids = reg_manager.start_batch(
-        combos=[],
-        headless=bool(payload.get("headless")),
-        jobs_repo=jobs_repo,
-        ctx=_build_context(),
-        with_2fa=bool(payload.get("with_2fa")),
-        reg_mode=retry_mode,
-        fallback_enabled=fallback_enabled,
-        concurrency=clamp_concurrency(
-            payload.get("concurrency"), retry_mode, fallback_enabled
-        ),
-        job_ids=[str(r["id"]) for r in targets],
+    headless = _json_bool(payload, "headless")
+    with_2fa = _json_bool(payload, "with_2fa")
+    concurrency = clamp_concurrency(
+        payload.get("concurrency"), retry_mode, fallback_enabled
     )
+    gmail_targets = [
+        row
+        for row in targets
+        if row.get("mail_mode") in MAIL_RENTAL_SOURCES
+    ]
+    outlook_targets = [
+        row
+        for row in targets
+        if row.get("mail_mode") not in MAIL_RENTAL_SOURCES
+    ]
+    if gmail_targets and outlook_targets:
+        raise HTTPException(
+            status_code=400,
+            detail="retry Hotmail/Outlook and Gmail in separate batches",
+        )
+    try:
+        if gmail_targets:
+            pool = _runtime_proxy_pool()
+
+            def provider_factory(source: str):
+                return _provider_for_source(source, proxy_url=pool.acquire_url())
+
+            ids = reg_manager.start_rental_retry_batch(
+                job_ids=[str(row["id"]) for row in gmail_targets],
+                provider_factory=provider_factory,
+                jobs_repo=jobs_repo,
+                rentals_repo=rentals_repo,
+                headless=headless,
+                with_2fa=with_2fa,
+                reg_mode=retry_mode,
+                fallback_enabled=fallback_enabled,
+                concurrency=concurrency,
+            )
+        else:
+            ids = reg_manager.start_batch(
+                combos=[],
+                headless=headless,
+                jobs_repo=jobs_repo,
+                ctx=_build_context(),
+                with_2fa=with_2fa,
+                reg_mode=retry_mode,
+                fallback_enabled=fallback_enabled,
+                concurrency=concurrency,
+                job_ids=[str(row["id"]) for row in outlook_targets],
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"job_ids": ids}
 
 
@@ -335,7 +594,7 @@ async def clear_jobs(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _check_for_api(row: dict[str, Any]) -> dict[str, Any]:
-    return {
+    public = {
         "id": row["id"],
         "email": row["email"],
         "status": row["status"],
@@ -348,11 +607,29 @@ def _check_for_api(row: dict[str, Any]) -> dict[str, Any]:
         "error": row.get("error"),
         "seconds": row.get("seconds"),
     }
+    if public.get("error") is not None:
+        public["error"] = sanitize_job_log_line(str(public["error"]))
+    return public
 
 
 @app.get("/api/checks")
 def list_checks() -> list[dict[str, Any]]:
     return [_check_for_api(r) for r in checks_repo.list_recent()]
+
+
+@app.get("/api/checks/{check_id}/logs")
+def check_logs(check_id: str) -> JSONResponse:
+    if not checks_repo.get(check_id):
+        raise HTTPException(status_code=404, detail="check not found")
+    return _no_store(
+        {
+            "check_id": check_id,
+            "lines": [
+                sanitize_job_log_line(line)
+                for line in checks_repo.logs(check_id, limit=500)
+            ],
+        }
+    )
 
 
 @app.post("/api/checks/start")
@@ -363,13 +640,19 @@ async def start_checks(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Chưa có combo nào.")
     concurrency = clamp_check_concurrency(payload.get("concurrency"))
     try:
+        records = proxy_repo.list_all()
+        proxy_enabled = _setting_enabled("proxy.enabled")
+        ProxyPool.from_records(records, enabled=proxy_enabled)
         ids = check_manager.start_batch(
             combos=combos,
             checks_repo=checks_repo,
-            proxy_pool_text=settings_repo.get("proxy.pool") or "",
-            rotation_mode=settings_repo.get("proxy.rotation_mode") or "round_robin",
+            proxy_pool_text="",
+            proxy_records=records,
+            proxy_enabled=proxy_enabled,
             concurrency=concurrency,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except CheckComboError as exc:
         raise HTTPException(status_code=400, detail=f"Combo sai — {exc}") from exc
     return {"check_ids": ids, "concurrency": min(concurrency, len(ids)) if ids else 0}
@@ -396,14 +679,21 @@ async def retry_checks(payload: dict[str, Any]) -> dict[str, Any]:
         targets = checks_repo.list_by_status(("error", "cancelled"))
     if not targets:
         return {"check_ids": []}
-    ids = check_manager.start_batch(
-        combos=[],
-        checks_repo=checks_repo,
-        proxy_pool_text=settings_repo.get("proxy.pool") or "",
-        rotation_mode=settings_repo.get("proxy.rotation_mode") or "round_robin",
-        concurrency=clamp_check_concurrency(payload.get("concurrency")),
-        check_ids=[str(r["id"]) for r in targets],
-    )
+    records = proxy_repo.list_all()
+    proxy_enabled = _setting_enabled("proxy.enabled")
+    try:
+        ProxyPool.from_records(records, enabled=proxy_enabled)
+        ids = check_manager.start_batch(
+            combos=[],
+            checks_repo=checks_repo,
+            proxy_pool_text="",
+            proxy_records=records,
+            proxy_enabled=proxy_enabled,
+            concurrency=clamp_check_concurrency(payload.get("concurrency")),
+            check_ids=[str(r["id"]) for r in targets],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"check_ids": ids}
 
 

@@ -26,11 +26,15 @@ from gpt_reg.browser.fingerprint import (
 from gpt_reg.core.context import RunContext
 from gpt_reg.fingerprint import get_profile, identity_id, new_seed, profile_for_seed
 from gpt_reg.mail.providers import build_request_from_combo
-from gpt_reg.mail.rental import MailRentalProvider
+from gpt_reg.mail.rental import MailRental, MailRentalProvider
 from gpt_reg.models import SignupRequest
 from gpt_reg.profile_identity import generate_profile_identity
 from gpt_reg.signup import _build_context, run_signup
-from gpt_reg.web.jobs.rental_coordinator import RentalCoordinator
+from gpt_reg.web.jobs.rental_coordinator import (
+    RentalCoordinator,
+    RentalMailboxProvider,
+    _is_expired,
+)
 
 FINISHED_STATUSES = ("success", "error", "cancelled")
 
@@ -463,6 +467,188 @@ class RegJobManager:
             if last:
                 self._emit({"type": "batch", "status": "idle"})
 
+    def start_rental_retry_batch(
+        self,
+        *,
+        job_ids: list[str],
+        provider_factory: Callable[[str], MailRentalProvider],
+        jobs_repo,
+        rentals_repo,
+        headless: bool,
+        with_2fa: bool = False,
+        reg_mode: str = "browser",
+        fallback_enabled: bool = False,
+        concurrency: int = 1,
+    ) -> list[str]:
+        """Retry Gmail jobs with their existing paid mailbox rental.
+
+        Validation happens before any job is reset. The worker only reconstructs
+        the mailbox bridge; it never rents, rerents, or closes the rental.
+        """
+        if self.running:
+            return []
+        ids = list(job_ids)
+        if not ids:
+            return []
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate Gmail retry job id")
+
+        prepared: list[tuple[str, str, dict[str, Any], MailRental]] = []
+        for job_id in ids:
+            row = jobs_repo.get(job_id)
+            if row is None:
+                raise ValueError(f"Gmail retry job missing: {job_id}")
+            source = str(row.get("mail_mode") or "").strip()
+            if source not in ("gmail_smsbower", "gmail_accstack"):
+                raise ValueError(f"job is not a Gmail rental: {job_id}")
+            rental_id = str(row.get("rental_id") or "").strip()
+            if not rental_id:
+                raise ValueError(f"Gmail retry rental missing for job: {job_id}")
+            rental_row = rentals_repo.get(rental_id)
+            if rental_row is None:
+                raise ValueError(f"Gmail retry rental missing: {rental_id}")
+            if _is_expired(rental_row.get("expires_at")):
+                raise ValueError(f"Gmail retry rental expired: {rental_id}")
+
+            source_email = str(row.get("source_email") or "").strip()
+            alias = str(row.get("email") or "").strip()
+            stored_base_email = str(rental_row.get("base_email") or "").strip()
+            external_id = str(rental_row.get("external_id") or "").strip()
+            provider_id = str(rental_row.get("provider") or "").strip()
+            if not source_email or not alias:
+                raise ValueError(f"Gmail retry job has no source email/alias: {job_id}")
+            if stored_base_email and stored_base_email.casefold() != source_email.casefold():
+                raise ValueError(f"Gmail retry source email does not match rental: {job_id}")
+            if not external_id or not provider_id:
+                raise ValueError(f"Gmail retry rental is incomplete: {rental_id}")
+
+            rental = MailRental(
+                provider=provider_id,
+                external_id=external_id,
+                base_email=source_email,
+                product_id=rental_row.get("product_id"),
+                expires_at=rental_row.get("expires_at"),
+                balance_after_rent=rental_row.get("balance_after_rent"),
+            )
+            prepared.append((job_id, source, row, rental))
+
+        self._stop_all.clear()
+        for job_id, _source, _row, _rental in prepared:
+            jobs_repo.ensure_fingerprint_identity(job_id)
+            with self._lock:
+                self._cancelled_jobs.discard(job_id)
+            jobs_repo.clear_logs(job_id)
+            jobs_repo.update(
+                job_id,
+                reg_mode=reg_mode,
+                status="queued",
+                error=None,
+                session_path=None,
+                mfa_activated=0,
+                browser_seconds=None,
+                http_seconds=None,
+                mfa_seconds=None,
+                started_at=None,
+                finished_at=None,
+            )
+
+        pending: queue.Queue[tuple[str, str, dict[str, Any], MailRental]] = queue.Queue()
+        for item in prepared:
+            pending.put(item)
+        workers = min(
+            clamp_concurrency(concurrency, reg_mode, fallback_enabled),
+            len(prepared),
+        )
+        self._emit(
+            {
+                "type": "batch",
+                "status": "running",
+                "concurrency": workers,
+                "jobs": len(prepared),
+                "retry": True,
+            }
+        )
+        with self._lock:
+            self._active_workers = workers
+        for index in range(workers):
+            threading.Thread(
+                target=self._rental_retry_worker,
+                args=(
+                    pending,
+                    provider_factory,
+                    jobs_repo,
+                    headless,
+                    with_2fa,
+                    reg_mode,
+                    fallback_enabled,
+                ),
+                name=f"rental-retry-worker-{index}",
+                daemon=True,
+            ).start()
+        return ids
+
+    def _rental_retry_worker(
+        self,
+        pending: "queue.Queue[tuple[str, str, dict[str, Any], MailRental]]",
+        provider_factory: Callable[[str], MailRentalProvider],
+        jobs_repo,
+        headless: bool,
+        with_2fa: bool,
+        reg_mode: str,
+        fallback_enabled: bool,
+    ) -> None:
+        try:
+            while True:
+                try:
+                    job_id, source, row, rental = pending.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    if self._stop_all.is_set() or self._should_cancel(job_id):
+                        self._finish_job(
+                            jobs_repo,
+                            job_id,
+                            status="cancelled",
+                            error="stopped",
+                        )
+                        continue
+                    provider = provider_factory(source)
+                    if str(provider.provider_id) != rental.provider:
+                        raise ValueError(
+                            f"Gmail retry provider mismatch: "
+                            f"{provider.provider_id!r} != {rental.provider!r}"
+                        )
+                    mailbox = RentalMailboxProvider(
+                        provider,
+                        rental,
+                        str(row["email"]),
+                        lambda current_job_id=job_id: self._should_cancel(current_job_id),
+                    )
+                    self._run_one(
+                        jobs_repo,
+                        row,
+                        headless=headless,
+                        with_2fa=with_2fa,
+                        reg_mode=reg_mode,
+                        fallback_enabled=fallback_enabled,
+                        mail_override=mailbox,
+                    )
+                except Exception as exc:
+                    self._finish_job(
+                        jobs_repo,
+                        job_id,
+                        status="error",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                finally:
+                    pending.task_done()
+        finally:
+            with self._lock:
+                self._active_workers -= 1
+                last = self._active_workers <= 0
+            if last:
+                self._emit({"type": "batch", "status": "idle"})
+
     def _attempt_signup(
         self, jobs_repo, row: dict[str, Any], job_id: str, *,
         headless: bool, with_2fa: bool, reg_mode: str, log,
@@ -522,6 +708,7 @@ class RegJobManager:
             browser_fingerprint=browser_fingerprint,
             user_agent=profile.user_agent,
             impersonate=profile.impersonate,
+            proxy=getattr(mail_override, "proxy_url", None),
         )
 
         def on_account_created(created_password: str) -> None:

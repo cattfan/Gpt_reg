@@ -103,6 +103,8 @@ class CheckManager:
         self, *, combos: list[str], checks_repo, proxy_pool_text: str,
         rotation_mode: str = "round_robin", concurrency: int = 1,
         check_ids: list[str] | None = None,
+        proxy_records: list[dict[str, Any]] | None = None,
+        proxy_enabled: bool | None = None,
     ) -> list[str]:
         if self.running:
             return []
@@ -154,7 +156,16 @@ class CheckManager:
         self._emit({"type": "batch", "status": "running", "concurrency": workers, "checks": len(ids)})
         with self._lock:
             self._active_workers = workers
-        pool = ProxyPool.from_multiline(proxy_pool_text, rotation_mode=rotation_mode or "round_robin")
+        if proxy_records is None:
+            pool = ProxyPool.from_multiline(
+                proxy_pool_text,
+                rotation_mode=rotation_mode or "round_robin",
+            )
+        else:
+            pool = ProxyPool.from_records(
+                proxy_records,
+                enabled=bool(proxy_enabled),
+            )
         for i in range(workers):
             threading.Thread(
                 target=self._worker, args=(pending, checks_repo, pool),

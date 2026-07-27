@@ -28,6 +28,7 @@ class AccStackMailRentalProvider:
         self,
         api_key: str,
         *,
+        proxy_url: str | None = None,
         timeout: float = 25.0,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] | None = None,
@@ -35,6 +36,7 @@ class AccStackMailRentalProvider:
         if not isinstance(api_key, str) or not api_key.strip():
             raise MailAuthError("AccStack API key is missing")
         self._key = api_key.strip()
+        self.proxy_url = proxy_url
         self._timeout = timeout
         self._transport = transport
         self._sleep = sleep
@@ -52,6 +54,7 @@ class AccStackMailRentalProvider:
                 base_url=BASE_URL,
                 headers={"X-API-Key": self._key, "Accept": "application/json"},
                 timeout=self._timeout,
+                proxy=self.proxy_url,
                 verify=True,
                 follow_redirects=False,
                 transport=self._transport,

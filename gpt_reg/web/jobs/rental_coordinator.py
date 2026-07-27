@@ -40,6 +40,7 @@ class RentalMailboxProvider:
         self._rental = rental
         self._alias = alias
         self._should_cancel = should_cancel
+        self.proxy_url = getattr(provider, "proxy_url", None)
 
     def wait_for_otp(
         self,

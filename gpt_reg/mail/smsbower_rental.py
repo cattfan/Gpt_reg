@@ -50,6 +50,7 @@ class SmsBowerMailRentalProvider:
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
+        self.proxy_url = proxy_url
         self._client = SmsBowerClient(
             api_key,
             proxy_url=proxy_url,
