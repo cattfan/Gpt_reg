@@ -10,5 +10,6 @@ frontend/node_modules/
 .claude/
 .playwright-cli/
 output/
+.worktrees/
 runtime/*
 !runtime/.gitkeep
