@@ -27,6 +27,7 @@ from gpt_reg.core.context import RunContext
 from gpt_reg.fingerprint import get_profile, identity_id, new_seed, profile_for_seed
 from gpt_reg.mail.providers import build_request_from_combo
 from gpt_reg.models import SignupRequest
+from gpt_reg.profile_identity import generate_profile_identity
 from gpt_reg.signup import _build_context, run_signup
 
 FINISHED_STATUSES = ("success", "error", "cancelled")
@@ -135,6 +136,7 @@ class RegJobManager:
             "started_at",
             "finished_at",
             "registered_at",
+            "profile_region",
         )
         snapshot = {
             "kind": self.kind,
@@ -184,6 +186,7 @@ class RegJobManager:
         reg_mode: str = "browser",
         fallback_enabled: bool = False,
         concurrency: int = 1,
+        profile_region: str = "vi",
         job_ids: list[str] | None = None,
     ) -> list[str]:
         """Tạo job rồi chạy bằng pool `concurrency` worker.
@@ -234,6 +237,10 @@ class RegJobManager:
                 job_id = uuid.uuid4().hex
                 fingerprint_seed = new_seed()
                 fingerprint_profile = profile_for_seed(fingerprint_seed).name
+                profile_identity = generate_profile_identity(
+                    profile_region,
+                    seed=job_id,
+                )
                 jobs_repo.create(
                     {
                         "id": job_id,
@@ -251,6 +258,9 @@ class RegJobManager:
                         "fingerprint_seed": fingerprint_seed,
                         "fingerprint_profile": fingerprint_profile,
                         "fingerprint_data": None,
+                        "profile_region": profile_identity.region,
+                        "profile_name": profile_identity.name,
+                        "birthdate": profile_identity.birthdate,
                     }
                 )
                 ids.append(job_id)
@@ -353,6 +363,8 @@ class RegJobManager:
         )
         req = SignupRequest(
             email=email,
+            name=str(row.get("profile_name") or "ChatGPT User"),
+            birthdate=str(row.get("birthdate") or "2000-01-01"),
             password=password,
             outlook_combo=row["combo"],
             headless=headless,
