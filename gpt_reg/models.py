@@ -17,6 +17,7 @@ SignupCheckpoint = Literal[
 ]
 SignupCheckpointCallback = Callable[[SignupCheckpoint], Awaitable[None] | None]
 SignupIntent = Literal["register", "resume_existing", "probe_existing"]
+RegistrationOutcome = Literal["success", "account_exists", "failed", "cancelled"]
 
 
 class SignupRequest(BaseModel):
@@ -25,7 +26,10 @@ class SignupRequest(BaseModel):
     birthdate: str = "2000-01-01"
     password: str | None = Field(default=None, repr=False)
     reg_mode: str = Field(default="browser", pattern="^(browser|http|pure_request)$")
-    mail_provider: str = Field(default="outlook", pattern="^(outlook)$")
+    mail_provider: str = Field(
+        default="outlook",
+        pattern="^(outlook|gmail_smsbower|gmail_accstack)$",
+    )
     outlook_combo: str | None = Field(default=None, repr=False)
     headless: bool = False
     keep_browser_open: bool = False
@@ -50,6 +54,7 @@ class BrowserHandoff(BaseModel):
     user_agent: str | None = None
     impersonate: str | None = None
     fingerprint_profile: str | None = None
+    registration_outcome: RegistrationOutcome = "success"
     # Mật khẩu THẬT của tài khoản khi phase tự chọn khác `request.password`
     # (đường đăng nhập lại dùng mật khẩu đã lưu, không phải mật khẩu hộp thư).
     account_password: str | None = Field(default=None, repr=False)
@@ -60,6 +65,7 @@ class SignupResult(BaseModel):
     email: str
     password: str | None = Field(default=None, repr=False)
     error: str | None = None
+    outcome: RegistrationOutcome | None = None
     fallback_eligible: bool = False
     handoff: BrowserHandoff | None = None
     access_token: str | None = Field(default=None, repr=False)

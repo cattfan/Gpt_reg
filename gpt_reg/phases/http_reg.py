@@ -1158,6 +1158,7 @@ def _run_flow(
             "authenticated_email": authenticated_email or request.email,
             "account_password": password,
             "recovered": True,
+            "registration_outcome": "account_exists",
             "session": session,
         }
 
@@ -1317,6 +1318,7 @@ def _run_flow(
         "user_id": user_id or None,
         "authenticated_email": authenticated_email or request.email,
         "account_password": password,
+        "registration_outcome": "account_exists" if login_mode else "success",
         "session": session,
     }
 
@@ -1382,6 +1384,7 @@ class HttpRegPhase:
             user_agent=result.get("user_agent"),
             impersonate=result.get("impersonate"),
             fingerprint_profile=result.get("fingerprint_profile"),
+            registration_outcome=result.get("registration_outcome", "success"),
         )
 
 

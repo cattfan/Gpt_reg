@@ -26,9 +26,11 @@ from gpt_reg.browser.fingerprint import (
 from gpt_reg.core.context import RunContext
 from gpt_reg.fingerprint import get_profile, identity_id, new_seed, profile_for_seed
 from gpt_reg.mail.providers import build_request_from_combo
+from gpt_reg.mail.rental import MailRentalProvider
 from gpt_reg.models import SignupRequest
 from gpt_reg.profile_identity import generate_profile_identity
 from gpt_reg.signup import _build_context, run_signup
+from gpt_reg.web.jobs.rental_coordinator import RentalCoordinator
 
 FINISHED_STATUSES = ("success", "error", "cancelled")
 
@@ -325,9 +327,146 @@ class RegJobManager:
             if last:
                 self._emit({"type": "batch", "status": "idle"})
 
+    def start_rental_batch(
+        self,
+        *,
+        rental_count: int,
+        provider_factory: Callable[[], MailRentalProvider],
+        jobs_repo,
+        rentals_repo,
+        source: str,
+        product_id: str | None,
+        alias_limit: int,
+        profile_region: str,
+        headless: bool,
+        with_2fa: bool = False,
+        reg_mode: str = "browser",
+        fallback_enabled: bool = False,
+        concurrency: int = 1,
+        balance_before: int | None = None,
+    ) -> list[str]:
+        if self.running:
+            return []
+        if not isinstance(rental_count, int) or rental_count < 1:
+            raise ValueError("rental_count must be a positive integer")
+        if not isinstance(alias_limit, int) or alias_limit < 1:
+            raise ValueError("alias_limit must be a positive integer")
+        self._stop_all.clear()
+        rental_ids = [uuid.uuid4().hex for _ in range(rental_count)]
+        pending: queue.Queue[str] = queue.Queue()
+        for rental_id in rental_ids:
+            pending.put(rental_id)
+        workers = min(
+            clamp_concurrency(concurrency, reg_mode, fallback_enabled),
+            rental_count,
+        )
+        self._emit(
+            {
+                "type": "batch",
+                "status": "running",
+                "concurrency": workers,
+                "rentals": rental_count,
+                "source": source,
+            }
+        )
+        with self._lock:
+            self._active_workers = workers
+        for index in range(workers):
+            threading.Thread(
+                target=self._rental_worker,
+                args=(
+                    pending,
+                    provider_factory,
+                    jobs_repo,
+                    rentals_repo,
+                    source,
+                    product_id,
+                    alias_limit,
+                    profile_region,
+                    headless,
+                    with_2fa,
+                    reg_mode,
+                    fallback_enabled,
+                    balance_before,
+                ),
+                name=f"rental-worker-{index}",
+                daemon=True,
+            ).start()
+        return rental_ids
+
+    def _rental_worker(
+        self,
+        pending: "queue.Queue[str]",
+        provider_factory: Callable[[], MailRentalProvider],
+        jobs_repo,
+        rentals_repo,
+        source: str,
+        product_id: str | None,
+        alias_limit: int,
+        profile_region: str,
+        headless: bool,
+        with_2fa: bool,
+        reg_mode: str,
+        fallback_enabled: bool,
+        balance_before: int | None,
+    ) -> None:
+        coordinator = RentalCoordinator()
+        try:
+            while True:
+                try:
+                    rental_id = pending.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    if self._stop_all.is_set():
+                        continue
+                    provider = provider_factory()
+                    coordinator.run_rental(
+                        rental_id=rental_id,
+                        provider=provider,
+                        rentals_repo=rentals_repo,
+                        jobs_repo=jobs_repo,
+                        source=source,
+                        product_id=product_id,
+                        alias_limit=alias_limit,
+                        profile_region=profile_region,
+                        reg_mode=reg_mode,
+                        execute=lambda row, mailbox: self._run_one(
+                            jobs_repo,
+                            row,
+                            headless=headless,
+                            with_2fa=with_2fa,
+                            reg_mode=reg_mode,
+                            fallback_enabled=fallback_enabled,
+                            mail_override=mailbox,
+                        ),
+                        should_cancel=self._stop_all.is_set,
+                        balance_before=balance_before,
+                    )
+                except Exception as exc:
+                    self._emit(
+                        {
+                            "type": "rental",
+                            "rental_id": rental_id,
+                            "status": "error",
+                            "error": sanitize_job_log_line(
+                                f"{type(exc).__name__}: {exc}"
+                            ),
+                        }
+                    )
+                finally:
+                    pending.task_done()
+        finally:
+            with self._lock:
+                self._active_workers -= 1
+                last = self._active_workers <= 0
+            if last:
+                self._emit({"type": "batch", "status": "idle"})
+
     def _attempt_signup(
         self, jobs_repo, row: dict[str, Any], job_id: str, *,
         headless: bool, with_2fa: bool, reg_mode: str, log,
+        mail_override=None,
     ):
         identity = jobs_repo.ensure_fingerprint_identity(job_id)
         fingerprint_seed = str(identity["fingerprint_seed"])
@@ -358,17 +497,25 @@ class RegJobManager:
         saved_password = str(row.get("password") or "").strip() or None
         if saved_password:
             log("[job] dùng mật khẩu tài khoản đã ghi ở lần chạy trước")
-        email, password = build_request_from_combo(
-            row["combo"], password_override=saved_password
-        )
+        if mail_override is None:
+            email, password = build_request_from_combo(
+                row["combo"], password_override=saved_password
+            )
+            outlook_combo = row["combo"]
+            mail_provider = "outlook"
+        else:
+            email = str(row["email"])
+            password = saved_password
+            outlook_combo = None
+            mail_provider = str(row.get("mail_mode") or "gmail_smsbower")
         req = SignupRequest(
             email=email,
             name=str(row.get("profile_name") or "ChatGPT User"),
             birthdate=str(row.get("birthdate") or "2000-01-01"),
             password=password,
-            outlook_combo=row["combo"],
+            outlook_combo=outlook_combo,
             headless=headless,
-            mail_provider="outlook",
+            mail_provider=mail_provider,
             reg_mode=reg_mode,
             fingerprint_seed=fingerprint_seed,
             fingerprint_profile=profile.name,
@@ -390,12 +537,14 @@ class RegJobManager:
             with_2fa=with_2fa,
             should_cancel=lambda: self._should_cancel(job_id),
             on_account_created=on_account_created,
+            mail=mail_override,
         )
 
     def _run_one(
         self, jobs_repo, row: dict[str, Any], *, headless: bool, with_2fa: bool,
         reg_mode: str, fallback_enabled: bool = False,
-    ) -> None:
+        mail_override=None,
+    ):
         job_id = str(row["id"])
         with self._lock:
             self._running_jobs.add(job_id)
@@ -407,12 +556,20 @@ class RegJobManager:
             jobs_repo.append_log(job_id, public_line)
             self._emit({"type": "log", "job_id": job_id, "line": public_line})
 
+        def attempt(attempt_row: dict[str, Any], mode: str):
+            kwargs = {
+                "headless": headless,
+                "with_2fa": with_2fa,
+                "reg_mode": mode,
+                "log": log,
+            }
+            if mail_override is not None:
+                kwargs["mail_override"] = mail_override
+            return self._attempt_signup(jobs_repo, attempt_row, job_id, **kwargs)
+
         try:
             log(f"[job] primary={reg_mode}, fallback={'on' if fallback_enabled else 'off'}")
-            result = self._attempt_signup(
-                jobs_repo, row, job_id,
-                headless=headless, with_2fa=with_2fa, reg_mode=reg_mode, log=log,
-            )
+            result = attempt(row, reg_mode)
             fallback_mode = "browser" if reg_mode == "http" else "http"
             if (
                 fallback_enabled
@@ -430,10 +587,7 @@ class RegJobManager:
                     f"fallback={fallback_mode}"
                 )
                 self._emit({"type": "job", "job_id": job_id, "status": "running"})
-                fallback_result = self._attempt_signup(
-                    jobs_repo, fresh, job_id,
-                    headless=headless, with_2fa=with_2fa, reg_mode=fallback_mode, log=log,
-                )
+                fallback_result = attempt(fresh, fallback_mode)
                 if fallback_result.browser_seconds is None:
                     fallback_result.browser_seconds = primary_browser_seconds
                 if fallback_result.http_seconds is None:
@@ -448,7 +602,16 @@ class RegJobManager:
             with self._lock:
                 self._running_jobs.discard(job_id)
 
-        if result.ok:
+        if mail_override is not None and result.outcome == "account_exists":
+            self._finish_job(
+                jobs_repo,
+                job_id,
+                status="error",
+                error=result.error or "account already exists",
+                browser_seconds=result.browser_seconds,
+                http_seconds=result.http_seconds,
+            )
+        elif result.ok:
             self._finish_job(
                 jobs_repo,
                 job_id,
@@ -471,6 +634,7 @@ class RegJobManager:
                 browser_seconds=result.browser_seconds,
                 http_seconds=result.http_seconds,
             )
+        return result
 
     def _finish_job(self, jobs_repo, job_id: str, *, status: str, **fields: Any) -> None:
         if fields.get("error") is not None:

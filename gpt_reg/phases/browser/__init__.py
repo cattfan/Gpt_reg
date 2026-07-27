@@ -232,6 +232,7 @@ class BrowserPhase:
         last_screen: str | None = None
         same_screen = 0
         unknown_reloaded = False
+        account_existed = False
         next_snapshot = time.monotonic() + STUCK_SNAPSHOT_EVERY
 
         while not deadline.expired():
@@ -264,6 +265,7 @@ class BrowserPhase:
                     request,
                     callback_url=callback_url,
                     otp_seconds=otp_seconds,
+                    account_existed=account_existed,
                     deadline=deadline,
                     log=log,
                 )
@@ -309,7 +311,9 @@ class BrowserPhase:
                 register_attempted = True
                 if otp_since is None:
                     otp_since = otp_mod.utc_now()
-                await self._register(page, request.email, password, ctx=ctx, log=log)
+                account_existed = await self._register(
+                    page, request.email, password, ctx=ctx, log=log
+                )
                 await asyncio.sleep(1.0)
                 continue
 
@@ -324,6 +328,7 @@ class BrowserPhase:
                     await asyncio.sleep(0.5)
                     continue
                 login_attempted = True
+                account_existed = True
                 if otp_since is None:
                     otp_since = otp_mod.utc_now()
                 log("[flow] account đã tồn tại — đăng nhập bằng password")
@@ -346,6 +351,7 @@ class BrowserPhase:
                     and not register_attempted
                     and not login_attempted
                 ):
+                    account_existed = True
                     cold_otp_resent = True
                     log("[flow] vào màn OTP nhưng chưa gửi mã lần này — bấm Resend lấy mã mới")
                     await otp_mod.click_resend(page, log)
@@ -408,6 +414,7 @@ class BrowserPhase:
                     request,
                     callback_url=callback_url,
                     otp_seconds=otp_seconds,
+                    account_existed=account_existed,
                     deadline=deadline,
                     log=log,
                 )
@@ -448,6 +455,7 @@ class BrowserPhase:
         *,
         callback_url: str | None,
         otp_seconds: float,
+        account_existed: bool,
         deadline: Deadline,
         log: Callable[[str], None],
     ) -> BrowserHandoff:
@@ -461,9 +469,10 @@ class BrowserPhase:
             otp_seconds=otp_seconds,
             authenticated_email=request.email,
             access_token=access,
+            registration_outcome="account_exists" if account_existed else "success",
         )
 
-    async def _register(self, page, email: str, password: str, *, ctx, log) -> None:
+    async def _register(self, page, email: str, password: str, *, ctx, log) -> bool:
         result = await reg.register_user(page, email=email, password=password, log=log)
         status = result.get("status")
         body = result.get("body") or {}
@@ -479,7 +488,7 @@ class BrowserPhase:
                     await page.goto(cont, wait_until="domcontentloaded", timeout=30_000)
                 except Exception as exc:
                     log(f"[flow] mở continue_url lỗi: {type(exc).__name__}: {exc}")
-            return
+            return False
         body_str = json.dumps(body) if isinstance(body, dict) else str(body or "")
         if status == 409 or any(k in body_str.lower() for k in ("already", "exists")):
             # Chỉ log "chuyển sang login" là chưa đủ: SPA vẫn đứng ở màn tạo mật
@@ -495,7 +504,7 @@ class BrowserPhase:
                 )
             except Exception as exc:
                 log(f"[flow] điều hướng login lỗi: {type(exc).__name__}: {exc}")
-            return
+            return True
         raise BrowserPhaseError(f"register failed HTTP {status}: {body_str[:200]}", step="register")
 
     async def _snapshot(self, ctx: RunContext, page, screen: str, *, log) -> None:

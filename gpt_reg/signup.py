@@ -12,6 +12,7 @@ from playwright.async_api import Error as PlaywrightError
 from gpt_reg.config import Settings, ensure_runtime_dirs, load_settings
 from gpt_reg.core.constants import EXIT_CANCELLED, EXIT_CHALLENGE, EXIT_ERROR, EXIT_OK
 from gpt_reg.core.context import RunContext
+from gpt_reg.core.contracts import MailProvider
 from gpt_reg.core.exceptions import (
     BrowserPhaseError,
     ChallengeBlockedError,
@@ -230,6 +231,7 @@ def run_signup(
     session_file: Path | None = None,
     should_cancel: Callable[[], bool] | None = None,
     on_account_created: Callable[[str], None] | None = None,
+    mail: MailProvider | None = None,
 ) -> SignupResult:
     logger = log or (lambda msg: None)
     settings = settings or load_settings()
@@ -237,7 +239,7 @@ def run_signup(
         settings, should_cancel=should_cancel, on_account_created=on_account_created
     )
 
-    if not request.outlook_combo:
+    if mail is None and not request.outlook_combo:
         return SignupResult(
             ok=False,
             email=request.email,
@@ -261,12 +263,13 @@ def run_signup(
     if proxy_url:
         req = req.model_copy(update={"proxy": proxy_url})
 
-    mail = build_provider(
-        req.mail_provider,
-        combo_line=req.outlook_combo,
-        state_dir=ctx.settings.outlook_state_dir,
-        proxy_url=proxy_url,
-    )
+    if mail is None:
+        mail = build_provider(
+            req.mail_provider,
+            combo_line=str(req.outlook_combo),
+            state_dir=ctx.settings.outlook_state_dir,
+            proxy_url=proxy_url,
+        )
 
     phase = get_phase(req.reg_mode)
 
@@ -305,6 +308,7 @@ def run_signup(
             result = SignupResult(
                 ok=True,
                 email=email,
+                outcome=handoff.registration_outcome,
                 password=account_password,
                 handoff=handoff,
                 access_token=access,
