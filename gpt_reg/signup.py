@@ -20,7 +20,7 @@ from gpt_reg.core.exceptions import (
     JobCancelledError,
 )
 from gpt_reg.db import connect, migrate
-from gpt_reg.db.repositories import SettingsRepository
+from gpt_reg.db.repositories import ProxyRepository, SettingsRepository
 from gpt_reg.fingerprint import get_profile, profile_for_seed
 from gpt_reg.mail.providers import build_provider
 from gpt_reg.models import BrowserHandoff, SignupRequest, SignupResult
@@ -69,8 +69,10 @@ def _shared_connection(settings: Settings):
             repo = SettingsRepository(conn)
             repo.apply_defaults(
                 {
-                    "proxy.rotation_mode": "round_robin",
+                    "proxy.enabled": "false",
                     "mail_mode.provider": "outlook",
+                    "mail.smsbower.alias_limit": "1",
+                    "mail.accstack.alias_limit": "1",
                     "browser.geoip": "true" if settings.browser_geoip else "false",
                     "reg.headless": "true" if settings.browser_headless else "false",
                     "ui.theme": "light",
@@ -91,11 +93,25 @@ def _build_context(
     settings = settings or load_settings()
     conn = _shared_connection(settings)
     repo = SettingsRepository(conn)
-    pool_text = repo.get("proxy.pool") or ""
-    rotation = repo.get("proxy.rotation_mode") or "round_robin"
-    # Pool riêng cho mỗi job: `acquire()` xoay vòng có trạng thái, dùng chung
-    # giữa các luồng sẽ làm hai job cùng lấy một proxy.
-    pool = ProxyPool.from_multiline(pool_text, rotation_mode=rotation or "round_robin")
+    proxy_repo = ProxyRepository(conn)
+    records = proxy_repo.list_all()
+    legacy_pool = repo.get("proxy.pool") or ""
+    if not records and legacy_pool.strip():
+        proxy_repo.replace_all(
+            [
+                {"value": line.strip(), "selected": True}
+                for line in legacy_pool.splitlines()
+                if line.strip()
+            ]
+        )
+        records = proxy_repo.list_all()
+    enabled = str(repo.get("proxy.enabled") or "false").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    pool = ProxyPool.from_records(records, enabled=enabled)
     return RunContext(
         settings=settings,
         proxy_pool=pool,
