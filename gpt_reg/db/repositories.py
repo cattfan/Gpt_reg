@@ -5,6 +5,19 @@ import sqlite3
 import threading
 from typing import Any
 
+_LOCKS_GUARD = threading.Lock()
+_CONNECTION_WRITE_LOCKS: dict[int, threading.RLock] = {}
+
+
+def _connection_write_lock(conn: sqlite3.Connection) -> threading.RLock:
+    key = id(conn)
+    with _LOCKS_GUARD:
+        lock = _CONNECTION_WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CONNECTION_WRITE_LOCKS[key] = lock
+        return lock
+
 _EXACT_KEYS: frozenset[str] = frozenset(
     {
         "proxy.pool",
@@ -44,6 +57,7 @@ def _validate_type(key: str, value: str | None) -> None:
 class SettingsRepository:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        self._write_lock = _connection_write_lock(conn)
 
     def get(self, key: str, default: str | None = None) -> str | None:
         if key not in _EXACT_KEYS:
@@ -57,15 +71,16 @@ class SettingsRepository:
         if key not in _EXACT_KEYS:
             raise KeyError(f"unknown settings key: {key}")
         _validate_type(key, value)
-        self._conn.execute(
-            """
-            INSERT INTO settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-            """,
-            (key, value),
-        )
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                """,
+                (key, value),
+            )
+            self._conn.commit()
 
     def apply_defaults(self, defaults: dict[str, str | None]) -> None:
         for key, val in defaults.items():
@@ -90,7 +105,7 @@ class SettingsRepository:
 class MailRentalRepository:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        self._write_lock = threading.Lock()
+        self._write_lock = _connection_write_lock(conn)
 
     def create(self, row: dict[str, Any]) -> None:
         cols = ", ".join(row.keys())
@@ -132,10 +147,11 @@ class MailRentalRepository:
 class ProxyRepository:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        self._write_lock = threading.Lock()
+        self._write_lock = _connection_write_lock(conn)
 
     def list_all(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute("SELECT * FROM proxies ORDER BY id").fetchall()
+        with self._write_lock:
+            rows = self._conn.execute("SELECT * FROM proxies ORDER BY id").fetchall()
         result = [dict(row) for row in rows]
         for row in result:
             row["selected"] = bool(row["selected"])
@@ -193,7 +209,7 @@ class JobRepository:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        self._write_lock = threading.Lock()
+        self._write_lock = _connection_write_lock(conn)
 
     def create(self, job: dict[str, Any]) -> None:
         cols = ", ".join(job.keys())
@@ -424,7 +440,7 @@ class ChecksRepository:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        self._write_lock = threading.Lock()
+        self._write_lock = _connection_write_lock(conn)
 
     def create(self, row: dict[str, Any]) -> None:
         cols = ", ".join(row.keys())

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -222,6 +224,66 @@ def _check_proxies(conn: sqlite3.Connection, cls: Any, failures: list[str]) -> N
         failures.append(f"ProxyRepository loi: {type(exc).__name__}: {exc}")
 
 
+def _check_proxy_transaction_isolation(
+    conn: sqlite3.Connection, cls: Any, failures: list[str]
+) -> None:
+    if cls is None:
+        return
+
+    from gpt_reg.db.repositories import SettingsRepository
+
+    repo = cls(conn)
+    settings = SettingsRepository(conn)
+    repo.replace_all([{"value": "old.example:8000", "selected": True}])
+    conn.execute(
+        """
+        CREATE TRIGGER fail_last_proxy
+        BEFORE INSERT ON proxies
+        WHEN NEW.value = 'fail.example:9999'
+        BEGIN
+            SELECT RAISE(ABORT, 'forced proxy insert failure');
+        END
+        """
+    )
+    conn.commit()
+
+    stop = threading.Event()
+    attempted = threading.Event()
+
+    def commit_setting_during_replace() -> None:
+        while not stop.is_set():
+            if conn.in_transaction:
+                attempted.set()
+                settings.set("proxy.enabled", "true")
+                return
+            time.sleep(0)
+
+    writer = threading.Thread(target=commit_setting_during_replace)
+    writer.start()
+    rows = [
+        {"value": f"proxy-{index}.example:{10000 + index}", "selected": True}
+        for index in range(2000)
+    ]
+    rows.append({"value": "fail.example:9999", "selected": True})
+    try:
+        repo.replace_all(rows)
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        failures.append("fixture proxy transaction khong tao loi insert")
+    finally:
+        stop.set()
+        writer.join(timeout=5)
+        conn.execute("DROP TRIGGER fail_last_proxy")
+        conn.commit()
+
+    if writer.is_alive() or not attempted.is_set():
+        failures.append("fixture proxy transaction khong chen duoc writer")
+    values = [row["value"] for row in repo.list_all()]
+    if values != ["old.example:8000"]:
+        failures.append("ProxyRepository rollback bi writer khac commit do dang")
+
+
 def _check_check_logs(conn: sqlite3.Connection, cls: Any, failures: list[str]) -> None:
     if cls is None:
         failures.append("thieu ChecksRepository")
@@ -275,6 +337,7 @@ def main() -> int:
         checks_cls = getattr(repositories, "ChecksRepository", None)
         _check_mail_rentals(conn, rental_cls, failures)
         _check_proxies(conn, proxy_cls, failures)
+        _check_proxy_transaction_isolation(conn, proxy_cls, failures)
         _check_check_logs(conn, checks_cls, failures)
 
         for name in ("MailRentalRepository", "ProxyRepository", "ChecksRepository"):
