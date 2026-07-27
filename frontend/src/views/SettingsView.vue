@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { CheckCircle2, CircleOff, Eye, EyeOff, KeyRound, Network, PlugZap, RefreshCw, Save } from '@lucide/vue'
+import { CheckCircle2, CircleOff, Eye, EyeOff, KeyRound, RefreshCw, Save } from '@lucide/vue'
 
 import UiPanel from '../components/UiPanel.vue'
 import { showToast } from '../composables/useToast'
@@ -117,45 +117,48 @@ onMounted(async () => {
 
 <template>
   <div class="workspace settings-workspace" data-testid="settings-view">
-    <div class="settings-layout">
-      <nav class="settings-nav" :aria-label="t('settings.navigation')">
-        <a href="#settings-integrations"><PlugZap :size="16" />{{ t('settings.integrations') }}</a>
-        <a href="#settings-proxy"><Network :size="16" />{{ t('settings.proxy') }}</a>
-      </nav>
-
-      <div class="settings-content">
-        <UiPanel id="settings-integrations" :title="t('settings.integrations')" :subtitle="t('settings.integrationsHint')" class="settings-section-panel">
-          <section v-for="integration in integrations" :key="integration.id" class="integration-section">
-            <header class="integration-heading">
-              <div>
-                <component :is="integrationStatus[integration.id]?.configured || hasIntegrationKey[integration.id] ? CheckCircle2 : CircleOff" :size="17" />
-                <span><strong>{{ t(`settings.${integration.id}`) }}</strong><small>{{ integrationStatus[integration.id]?.configured || hasIntegrationKey[integration.id] ? t('settings.configured') : t('settings.notConfigured') }}</small></span>
-              </div>
-              <button class="icon-btn" type="button" :title="t('settings.refreshStatus')" :aria-label="`${t('settings.refreshStatus')} ${t(`settings.${integration.id}`)}`" :disabled="loadingStatus[integration.id]" @click="refreshIntegration(integration.id)"><RefreshCw :size="16" :class="{ spinning: loadingStatus[integration.id] }" /></button>
-            </header>
-            <div class="integration-body">
-              <div class="integration-metrics">
-                <div><span>{{ t('settings.balance') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.balance, integrationStatus[integration.id]?.currency) : '-' }}</strong></div>
-                <div><span>{{ t('settings.price') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.price, integrationStatus[integration.id]?.currency) : '-' }}</strong></div>
-                <div><span>{{ t('settings.inventory') }}</span><strong>{{ integrationStatus[integration.id]?.stock ?? '-' }}</strong></div>
-                <div><span>{{ t('settings.affordable') }}</span><strong>{{ integrationStatus[integration.id]?.affordable ?? '-' }}</strong></div>
-              </div>
-              <div class="integration-key-row">
-                <label class="field">
-                  <span><KeyRound :size="14" />{{ t('settings.apiKey') }}</span>
-                  <span class="password-field">
-                    <input v-model="integrationKeys[integration.id]" :data-testid="`${integration.id}-api-key`" :type="showIntegrationKey[integration.id] ? 'text' : 'password'" autocomplete="new-password" :placeholder="hasIntegrationKey[integration.id] ? '••••••••••••' : `${t(`settings.${integration.id}`)} API key`">
-                    <button type="button" :title="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" :aria-label="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" @click="showIntegrationKey[integration.id] = !showIntegrationKey[integration.id]"><EyeOff v-if="showIntegrationKey[integration.id]" :size="16" /><Eye v-else :size="16" /></button>
-                  </span>
-                </label>
-                <button class="btn primary" type="button" :disabled="savingKey[integration.id] || !integrationKeys[integration.id].trim()" @click="saveIntegration(integration.id)"><Save :size="16" />{{ t('settings.saveKey') }}</button>
-              </div>
-              <p v-if="integrationError[integration.id] || integrationStatus[integration.id]?.reason" class="field-error">{{ integrationError[integration.id] || integrationStatus[integration.id]?.reason }}</p>
+    <div class="settings-content">
+      <section id="settings-integrations" class="settings-integrations-grid" data-testid="settings-integrations-grid" :aria-label="t('settings.integrations')">
+        <h2 class="sr-only">{{ t('settings.integrations') }}</h2>
+        <UiPanel
+          v-for="integration in integrations"
+          :key="integration.id"
+          :title="t(`settings.${integration.id}`)"
+          :subtitle="integrationStatus[integration.id]?.configured || hasIntegrationKey[integration.id] ? t('settings.configured') : t('settings.notConfigured')"
+          class="integration-card"
+          :class="{ configured: integrationStatus[integration.id]?.configured || hasIntegrationKey[integration.id] }"
+          :data-testid="`integration-card-${integration.id}`"
+        >
+          <template #actions>
+            <span class="integration-state" :class="{ configured: integrationStatus[integration.id]?.configured || hasIntegrationKey[integration.id] }" aria-hidden="true">
+              <component :is="integrationStatus[integration.id]?.configured || hasIntegrationKey[integration.id] ? CheckCircle2 : CircleOff" :size="16" />
+            </span>
+            <button class="icon-btn" type="button" :title="t('settings.refreshStatus')" :aria-label="`${t('settings.refreshStatus')} ${t(`settings.${integration.id}`)}`" :disabled="loadingStatus[integration.id]" @click="refreshIntegration(integration.id)"><RefreshCw :size="16" :class="{ spinning: loadingStatus[integration.id] }" /></button>
+          </template>
+          <form class="integration-body" @submit.prevent="saveIntegration(integration.id)">
+            <input type="text" name="username" autocomplete="username" :value="integration.id" hidden>
+            <div class="integration-metrics">
+              <div><span>{{ t('settings.balance') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.balance, integrationStatus[integration.id]?.currency) : '-' }}</strong></div>
+              <div><span>{{ t('settings.price') }}</span><strong>{{ integrationStatus[integration.id] ? formatMoney(integrationStatus[integration.id]?.price, integrationStatus[integration.id]?.currency) : '-' }}</strong></div>
+              <div><span>{{ t('settings.inventory') }}</span><strong>{{ integrationStatus[integration.id]?.stock ?? '-' }}</strong></div>
+              <div><span>{{ t('settings.affordable') }}</span><strong>{{ integrationStatus[integration.id]?.affordable ?? '-' }}</strong></div>
             </div>
-          </section>
+            <div class="integration-key-row">
+              <label class="field">
+                <span><KeyRound :size="14" />{{ t('settings.apiKey') }}</span>
+                <span class="password-field">
+                  <input v-model="integrationKeys[integration.id]" :data-testid="`${integration.id}-api-key`" :type="showIntegrationKey[integration.id] ? 'text' : 'password'" autocomplete="new-password" :placeholder="hasIntegrationKey[integration.id] ? '••••••••••••' : `${t(`settings.${integration.id}`)} API key`">
+                  <button type="button" :title="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" :aria-label="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" @click="showIntegrationKey[integration.id] = !showIntegrationKey[integration.id]"><EyeOff v-if="showIntegrationKey[integration.id]" :size="16" /><Eye v-else :size="16" /></button>
+                </span>
+              </label>
+              <button class="btn primary" type="submit" :disabled="savingKey[integration.id] || !integrationKeys[integration.id].trim()"><Save :size="16" />{{ t('settings.saveKey') }}</button>
+            </div>
+            <p v-if="integrationError[integration.id] || integrationStatus[integration.id]?.reason" class="field-error">{{ integrationError[integration.id] || integrationStatus[integration.id]?.reason }}</p>
+          </form>
         </UiPanel>
+      </section>
 
-        <UiPanel id="settings-proxy" :title="t('settings.proxy')" :subtitle="t('settings.proxyHint')" class="settings-section-panel proxy-settings-panel">
+      <UiPanel id="settings-proxy" :title="t('settings.proxy')" :subtitle="t('settings.proxyHint')" class="proxy-settings-panel">
           <div class="proxy-toolbar">
             <label class="switch-control"><input v-model="proxyEnabled" data-testid="proxy-enabled" type="checkbox"><span /><b>{{ t('settings.useProxy') }}</b></label>
             <span class="proxy-mode" :class="{ active: proxyEnabled }">{{ t(proxyEnabled ? (selectedProxyCount ? 'settings.selectedRandom' : 'settings.proxyAllUsed') : 'settings.directMode') }}</span>
@@ -185,8 +188,7 @@ onMounted(async () => {
             <span>{{ t('settings.proxyCount', { selected: selectedProxyCount, total: proxyItems.length }) }}</span>
             <button class="btn primary" data-testid="proxy-save" type="button" :disabled="savingProxy" @click="saveProxy"><Save :size="16" />{{ t('settings.saveProxies') }}</button>
           </div>
-        </UiPanel>
-      </div>
+      </UiPanel>
     </div>
   </div>
 </template>

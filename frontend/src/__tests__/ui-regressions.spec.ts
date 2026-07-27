@@ -53,6 +53,13 @@ describe('UI regression contracts', () => {
     expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 900px\)[\s\S]*\.mobile-locale\s*\{[^}]*display:\s*flex/s)
   })
 
+  it('uses the same panel grid language throughout settings', () => {
+    expect(css).toMatch(/\.settings-content\s*\{[^}]*display:\s*grid/s)
+    expect(css).toMatch(/\.settings-integrations-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s)
+    expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*\.settings-integrations-grid\s*\{[^}]*grid-template-columns:\s*1fr/s)
+    expect(css).not.toMatch(/\.settings-nav\s*\{/s)
+  })
+
   it('uses an internal workspace scroll fallback on unusually short screens', () => {
     expect(css).toMatch(/@media \(min-width: 761px\) and \(max-height: 560px\)[\s\S]*\.workspace\s*\{[^}]*overflow:\s*auto/s)
   })
