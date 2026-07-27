@@ -1,18 +1,37 @@
-async function errorMessage(response: Response): Promise<string> {
+export interface ApiErrorDetail {
+  line?: number
+  message?: string
+  [key: string]: unknown
+}
+
+export class ApiRequestError extends Error {
+  constructor(public status: number, public detail: unknown, message: string) {
+    super(message)
+    this.name = 'ApiRequestError'
+  }
+}
+
+async function responseError(response: Response): Promise<ApiRequestError> {
+  let detail: unknown
   try {
     const payload = await response.json() as { detail?: unknown; error?: unknown }
-    const detail = payload.detail ?? payload.error
-    if (typeof detail === 'string' && detail.trim()) return detail
-    if (detail) return JSON.stringify(detail)
+    detail = payload.detail ?? payload.error
   } catch { /* response is not JSON */ }
-  return `HTTP ${response.status}`
+  const message = typeof detail === 'string' && detail.trim()
+    ? detail
+    : detail && typeof detail === 'object' && typeof (detail as ApiErrorDetail).message === 'string'
+      ? String((detail as ApiErrorDetail).message)
+      : detail
+        ? JSON.stringify(detail)
+        : `HTTP ${response.status}`
+  return new ApiRequestError(response.status, detail, message)
 }
 
 export async function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers)
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   const response = await fetch(path, { ...init, headers })
-  if (!response.ok) throw new Error(await errorMessage(response))
+  if (!response.ok) throw await responseError(response)
   return response
 }
 
@@ -26,6 +45,10 @@ export async function apiText(path: string): Promise<string> {
 
 export function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
   return apiJson<T>(path, { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function putJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  return apiJson<T>(path, { method: 'PUT', body: JSON.stringify(body) })
 }
 
 export function presentApiError(error: unknown, translate: (key: string) => string): string {

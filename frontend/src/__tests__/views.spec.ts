@@ -7,6 +7,18 @@ import SettingsView from '../views/SettingsView.vue'
 import { settleConfirm } from '../composables/useConfirm'
 import { createAppI18n } from '../i18n'
 
+const sseListeners = vi.hoisted(() => ({
+  registration: null as ((event: Record<string, unknown>) => void) | null,
+  checks: null as ((event: Record<string, unknown>) => void) | null,
+}))
+
+vi.mock('../services/sse', () => ({
+  subscribeSse: (scope: 'registration' | 'checks', listener: (event: Record<string, unknown>) => void) => {
+    sseListeners[scope] = listener
+    return () => { sseListeners[scope] = null }
+  },
+}))
+
 const ok = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body), {
   status: 200,
   headers: { 'Content-Type': 'application/json' },
@@ -19,11 +31,16 @@ function mountView(component: object) {
 describe('operational views', () => {
   beforeEach(() => {
     settleConfirm(false)
+    Object.assign(sseListeners, { registration: null, checks: null })
+    vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.includes('/api/limits')) return ok({ concurrency_choices: [1, 5], max_browser: 5, max_http: 5, check_concurrency_choices: [1, 5], max_check: 5 })
-      if (url.includes('/api/settings')) return ok({ 'proxy.pool': '', 'proxy.rotation_mode': 'round_robin' })
+      if (url.includes('/api/settings')) return ok({ 'reg.source': 'outlook', 'sms.smsbower.api_key': null, 'accstack.api_key': null })
+      if (url.includes('/api/mail-sources/status')) return ok({ configured: true, balance: 500, currency: 'USD', price: 50, stock: 10, affordable: 10, products: [{ id: '5', name: 'Gmail OpenAI', price: 50, stock: 10 }] })
+      if (url.endsWith('/api/proxies')) return ok({ enabled: false, items: [], selected: 0, total: 0 })
       if (url.includes('/api/sms/status')) return ok({ configured: false })
+      if (url.endsWith('/api/jobs/status')) return ok({ running: false })
       if (url.endsWith('/api/jobs')) return ok([
         { id: 'job-running', email: 'account@example.com', status: 'running', reg_mode: 'http' },
         { id: 'job-error', email: 'failed@example.com', status: 'error', reg_mode: 'browser', error: 'failed' },
@@ -33,6 +50,8 @@ describe('operational views', () => {
       if (url.endsWith('/api/jobs/retry')) return ok({ job_ids: ['job-error'] })
       if (url.endsWith('/api/jobs/clear')) return ok({ removed: 1 })
       if (url.endsWith('/api/checks')) return ok([{ id: 'check-1', email: 'account@example.com', status: 'running', has_subscription: false, mfa_enabled: false, deactivated: false }])
+      if (url.endsWith('/api/checks/check-1/logs')) return ok({ check_id: 'check-1', lines: ['historical check log'] })
+      if (url.includes('/api/checks/export?')) return Promise.resolve(new Response('', { status: 200 }))
       return ok([])
     }))
   })
@@ -47,6 +66,103 @@ describe('operational views', () => {
     expect(wrapper.get('button[aria-label="Xoá tất cả"]')).toBeTruthy()
     expect(wrapper.find('button button').exists()).toBe(false)
     expect(wrapper.get('[data-testid="registration-run"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('switches among three registration sources and sends source-specific payloads', async () => {
+    const defaultFetch = vi.mocked(fetch)
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/jobs') && !init?.method) return ok([])
+      return defaultFetch(input, init)
+    }))
+    const wrapper = mountView(RegistrationView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Hotmail/Outlook')
+    expect(wrapper.text()).toContain('Gmail (SMSBower)')
+    expect(wrapper.text()).toContain('Gmail (AccStack)')
+
+    await wrapper.get('[data-testid="source-gmail_smsbower"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('textarea[data-testid="outlook-input"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="rental-count"]')).toBeTruthy()
+    expect(wrapper.text()).toContain('Số dư')
+    expect(wrapper.text()).toContain('$5.00')
+
+    await wrapper.get('[data-testid="profile-ko"]').trigger('click')
+    await wrapper.get('[data-testid="rental-count"]').setValue('2')
+    await wrapper.get('[data-testid="registration-run"]').trigger('click')
+    await flushPromises()
+    const startCall = [...vi.mocked(fetch).mock.calls].reverse().find(([url]) => String(url).endsWith('/api/jobs/start'))
+    const body = JSON.parse(String(startCall?.[1]?.body))
+    expect(body).toMatchObject({ source: 'gmail_smsbower', rental_count: 2, profile_region: 'ko' })
+    expect(body).not.toHaveProperty('input')
+  })
+
+  it('only renders the AccStack product selector when multiple products are available', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/limits')) return ok({ concurrency_choices: [1], max_browser: 1, max_http: 1, check_concurrency_choices: [1], max_check: 1 })
+      if (url.includes('/api/settings')) return ok({ 'reg.source': 'gmail_accstack' })
+      if (url.includes('/api/mail-sources/status')) return ok({
+        configured: true, balance: 1000, currency: 'USD', price: 50, stock: 20, affordable: 20,
+        products: [{ id: '5', name: 'Gmail A', price: 50, stock: 10 }, { id: '6', name: 'Gmail B', price: 60, stock: 10 }],
+      })
+      if (url.endsWith('/api/jobs')) return ok([])
+      return ok([])
+    }))
+    const wrapper = mountView(RegistrationView)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="accstack-product"]').findAll('option')).toHaveLength(2)
+  })
+
+  it('keeps a Gmail rental batch locked until the manager reports idle', async () => {
+    const defaultFetch = vi.mocked(fetch)
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/jobs/start')) return ok({ rental_ids: ['rental-1'], rental_count: 1 })
+      if (url.endsWith('/api/jobs/status')) return ok({ running: true })
+      if (url.endsWith('/api/jobs') && !init?.method) return ok([])
+      return defaultFetch(input, init)
+    }))
+    const wrapper = mountView(RegistrationView)
+    await flushPromises()
+    await wrapper.get('[data-testid="source-gmail_smsbower"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="registration-run"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="registration-run"]').attributes('disabled')).toBeDefined()
+    sseListeners.registration?.({ type: 'batch', status: 'idle' })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="registration-run"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('unlocks a Gmail batch from runtime status when the idle SSE event is missed', async () => {
+    const defaultFetch = vi.mocked(fetch)
+    let runtimeRunning = false
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/jobs/start')) {
+        runtimeRunning = true
+        return ok({ rental_ids: ['rental-1'], rental_count: 1 })
+      }
+      if (url.endsWith('/api/jobs/status')) return ok({ running: runtimeRunning })
+      if (url.endsWith('/api/jobs') && !init?.method) return ok([])
+      return defaultFetch(input, init)
+    }))
+    const wrapper = mountView(RegistrationView)
+    await flushPromises()
+    await wrapper.get('[data-testid="source-gmail_smsbower"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="registration-run"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="registration-run"]').attributes('disabled')).toBeDefined()
+
+    runtimeRunning = false
+    sseListeners.registration?.({ type: 'job', status: 'success' })
+    await new Promise((resolve) => window.setTimeout(resolve, 350))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="registration-run"]').attributes('disabled')).toBeUndefined()
   })
 
   it('retries and deletes an individual terminal account', async () => {
@@ -84,6 +200,18 @@ describe('operational views', () => {
     await wrapper.get('[data-testid="registration-view"]').trigger('click')
     expect(wrapper.text()).not.toContain('account-specific log')
     expect(wrapper.find('.job-row.selected').exists()).toBe(false)
+  })
+
+  it('copies registration log without closing the selected job', async () => {
+    const wrapper = mountView(RegistrationView)
+    await flushPromises()
+    await wrapper.get('[data-testid="job-select-job-error"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="registration-copy-log"]').trigger('click')
+    await flushPromises()
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('account-specific log')
+    expect(wrapper.find('.job-row.selected').exists()).toBe(true)
   })
 
   it('sends an explicit opt-in engine fallback for start and retry', async () => {
@@ -127,11 +255,105 @@ describe('operational views', () => {
     expect(wrapper.get('[data-testid="checks-run"]').attributes('disabled')).toBeDefined()
   })
 
-  it('keeps sensitive SMS input as a password field', async () => {
+  it('loads, streams, copies and closes the selected account check log', async () => {
+    const wrapper = mountView(CheckAccountsView)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="check-select-check-1"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('historical check log')
+    expect(wrapper.find('tr.selected').exists()).toBe(true)
+
+    sseListeners.checks?.({ type: 'check_log', scope: 'check', check_id: 'other', line: 'wrong log' })
+    sseListeners.checks?.({ type: 'check_log', scope: 'check', check_id: 'check-1', line: 'realtime check log' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('wrong log')
+    expect(wrapper.text()).toContain('realtime check log')
+
+    await wrapper.get('[data-testid="check-copy-log"]').trigger('click')
+    await flushPromises()
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('historical check log\nrealtime check log')
+    expect(wrapper.find('tr.selected').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="checks-view"]').trigger('click')
+    expect(wrapper.find('tr.selected').exists()).toBe(false)
+  })
+
+  it('groups live Free and Plus accounts into quick-copy outputs', async () => {
+    const defaultFetch = vi.mocked(fetch)
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/checks') && !init?.method) return ok([
+        { id: 'free-1', email: 'free@example.com', status: 'live', plan: 'free', has_subscription: false, mfa_enabled: false, deactivated: false },
+        { id: 'plus-1', email: 'plus@example.com', status: 'live', plan: 'plus', has_subscription: true, mfa_enabled: true, deactivated: false },
+        { id: 'error-1', email: 'error@example.com', status: 'error', has_subscription: false, mfa_enabled: false, deactivated: false },
+      ])
+      if (String(input).includes('/api/checks/export?status=live&plan=free&fmt=combo')) {
+        return Promise.resolve(new Response('free@example.com|FreePass|FREE2FA\n', { status: 200 }))
+      }
+      if (String(input).includes('/api/checks/export?status=live&plan=plus&fmt=combo')) {
+        return Promise.resolve(new Response('plus@example.com|PlusPass|PLUS2FA\n', { status: 200 }))
+      }
+      return defaultFetch(input, init)
+    }))
+    const wrapper = mountView(CheckAccountsView)
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="free-accounts-output"]').element as HTMLTextAreaElement).value).toBe('free@example.com|FreePass|FREE2FA')
+    expect((wrapper.get('[data-testid="plus-accounts-output"]').element as HTMLTextAreaElement).value).toBe('plus@example.com|PlusPass|PLUS2FA')
+    await wrapper.get('[data-testid="copy-free-accounts"]').trigger('click')
+    await wrapper.get('[data-testid="copy-plus-accounts"]').trigger('click')
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('free@example.com|FreePass|FREE2FA')
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('plus@example.com|PlusPass|PLUS2FA')
+  })
+
+  it('renders integrations and selectable random proxy settings without Appearance', async () => {
     const wrapper = mountView(SettingsView)
     await flushPromises()
-    expect(wrapper.get('input[type="password"]')).toBeTruthy()
+    expect(wrapper.findAll('input[type="password"]')).toHaveLength(2)
+    expect(wrapper.text()).toContain('Tích hợp')
+    expect(wrapper.text()).toContain('SMSBower')
+    expect(wrapper.text()).toContain('AccStack')
     expect(wrapper.text()).toContain('Proxy')
-    expect(wrapper.text()).toContain('Giao diện')
+    expect(wrapper.text()).not.toContain('Giao diện')
+    expect(wrapper.text()).not.toContain('Round robin')
+  })
+
+  it('saves proxy toggle, parsed rows and selected subset', async () => {
+    const wrapper = mountView(SettingsView)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="proxy-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="proxy-editor"]').setValue('one.example:8001\ntwo.example:8002')
+    await wrapper.get('[data-testid="proxy-selected-1"]').setValue(true)
+    expect(wrapper.text()).toContain('1 / 2')
+    await wrapper.get('[data-testid="proxy-save"]').trigger('click')
+    await flushPromises()
+
+    const proxyCall = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith('/api/proxies') && init?.method === 'PUT')
+    expect(JSON.parse(String(proxyCall?.[1]?.body))).toEqual({
+      enabled: true,
+      items: [
+        { value: 'one.example:8001', selected: false },
+        { value: 'two.example:8002', selected: true },
+      ],
+    })
+  })
+
+  it('shows a proxy validation error on the matching line', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/settings')) return ok({})
+      if (url.includes('/api/mail-sources/status')) return ok({ configured: false, balance: 0, currency: 'USD', price: 0, stock: 0, affordable: 0, products: [] })
+      if (url.endsWith('/api/proxies') && init?.method === 'PUT') return Promise.resolve(new Response(JSON.stringify({ detail: { line: 2, message: 'bad proxy' } }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
+      if (url.endsWith('/api/proxies')) return ok({ enabled: false, items: [], selected: 0, total: 0 })
+      return ok([])
+    }))
+    const wrapper = mountView(SettingsView)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="proxy-editor"]').setValue('one.example:8001\nbad')
+    await wrapper.get('[data-testid="proxy-save"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="proxy-line-error-2"]').text()).toContain('bad proxy')
   })
 })

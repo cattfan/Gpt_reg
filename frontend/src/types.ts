@@ -15,6 +15,43 @@ export interface Job {
   created_at?: number
   started_at?: number | null
   finished_at?: number | null
+  profile_region?: ProfileRegion
+  alias_index?: number | null
+}
+
+export type RegistrationSource = 'outlook' | 'gmail_smsbower' | 'gmail_accstack'
+export type ProfileRegion = 'vi' | 'ko' | 'in'
+
+export interface MailProduct {
+  id: string
+  name: string
+  price: number
+  stock: number
+  description?: string
+}
+
+export interface MailSourceStatus {
+  configured: boolean
+  balance: number
+  currency: string
+  price: number
+  stock: number
+  affordable: number
+  products: MailProduct[]
+  reason?: string
+}
+
+export interface ProxyItem {
+  id?: number
+  value: string
+  selected: boolean
+}
+
+export interface ProxySettings {
+  enabled: boolean
+  items: ProxyItem[]
+  selected: number
+  total: number
 }
 
 export type CheckStatus = 'queued' | 'running' | 'live' | 'die' | 'onboarding' | 'error' | 'cancelled'

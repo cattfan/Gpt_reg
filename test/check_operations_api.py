@@ -99,6 +99,19 @@ def main() -> int:
     client = TestClient(server.app)
 
     try:
+        runtime = client.get("/api/jobs/status")
+        if runtime.status_code != 200 or runtime.json() != {"running": False}:
+            failures.append(
+                f"registration runtime status is wrong: {runtime.status_code} {runtime.text}"
+            )
+        manager.running = True
+        runtime = client.get("/api/jobs/status")
+        if runtime.status_code != 200 or runtime.json() != {"running": True}:
+            failures.append(
+                f"active registration runtime status is wrong: {runtime.status_code} {runtime.text}"
+            )
+        manager.running = False
+
         response = client.get("/api/mail-sources/status?source=gmail_smsbower")
         if response.status_code != 200:
             failures.append(f"mail source status HTTP {response.status_code}: {response.text}")
@@ -237,6 +250,7 @@ def main() -> int:
                 "email": "fixture@example.com",
                 "combo": "fixture@example.com|secret",
                 "status": "live",
+                "plan": "free",
                 "created_at": time.time(),
             }
         )
@@ -248,6 +262,19 @@ def main() -> int:
             failures.append("check logs API is cacheable")
         if client.get("/api/checks/missing/logs").status_code != 404:
             failures.append("missing check logs did not return 404")
+        combo_export = client.get(
+            "/api/checks/export?status=live&plan=free&fmt=combo"
+        )
+        if (
+            combo_export.status_code != 200
+            or combo_export.text.strip() != "fixture@example.com|secret"
+        ):
+            failures.append(
+                "categorized combo export is wrong: "
+                f"{combo_export.status_code} {combo_export.text!r}"
+            )
+        if combo_export.headers.get("cache-control") != "no-store":
+            failures.append("categorized combo export is cacheable")
     finally:
         server._build_context = original_context
         if original_provider is None:

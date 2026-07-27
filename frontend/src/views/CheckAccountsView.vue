@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Download, Eraser, Play, RotateCcw, Search, Square, Trash2 } from '@lucide/vue'
+import { Clipboard, Download, Eraser, Play, RotateCcw, Search, Square, Terminal, Trash2 } from '@lucide/vue'
 
 import StatStrip from '../components/StatStrip.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -20,7 +20,12 @@ const concurrencyOptions = ref([1, 2, 5, 10, 20, 50, 100, 200])
 const search = ref('')
 const statusFilter = ref('all')
 const planFilter = ref('all')
+const selectedCheckId = ref<string | null>(null)
+const checkLogs = ref<string[]>([])
+const freeOutput = ref('')
+const plusOutput = ref('')
 const loading = ref(false)
+let selectedRequest = 0
 let refreshTimer: number | undefined
 let pollTimer: number | undefined
 let unsubscribe = () => {}
@@ -30,6 +35,13 @@ const runningCount = computed(() => checks.value.filter((row) => row.status === 
 const liveCount = computed(() => checks.value.filter((row) => row.status === 'live').length)
 const invalidCount = computed(() => checks.value.filter((row) => ['die', 'error', 'onboarding', 'cancelled'].includes(row.status)).length)
 const plans = computed(() => [...new Set(checks.value.map((row) => row.plan).filter(Boolean) as string[])].sort())
+const selectedCheck = computed(() => checks.value.find((row) => row.id === selectedCheckId.value))
+const freeAccounts = computed(() => checks.value.filter((row) => (
+  row.status === 'live' && `${row.plan || ''} ${row.plan_detail || ''}`.toLowerCase().includes('free')
+)))
+const plusAccounts = computed(() => checks.value.filter((row) => (
+  row.status === 'live' && `${row.plan || ''} ${row.plan_detail || ''}`.toLowerCase().includes('plus')
+)))
 const filteredChecks = computed(() => checks.value.filter((row) => {
   const matchesSearch = row.email.toLowerCase().includes(search.value.trim().toLowerCase())
   const matchesStatus = statusFilter.value === 'all' || row.status === statusFilter.value
@@ -56,8 +68,23 @@ function scheduleRefresh() {
   refreshTimer = window.setTimeout(() => { refreshTimer = undefined; void refreshChecks() }, 300)
 }
 async function refreshChecks() {
-  try { checks.value = await apiJson<CheckRecord[]>('/api/checks') }
-  catch (error) { showToast(message(error), 'danger') }
+  try {
+    checks.value = await apiJson<CheckRecord[]>('/api/checks')
+    if (selectedCheckId.value && !checks.value.some((row) => row.id === selectedCheckId.value)) closeSelectedLog()
+    await refreshAccountOutputs()
+  } catch (error) { showToast(message(error), 'danger') }
+}
+async function refreshAccountOutputs() {
+  const [free, plus] = await Promise.all([
+    freeAccounts.value.length
+      ? apiText('/api/checks/export?status=live&plan=free&fmt=combo')
+      : Promise.resolve(''),
+    plusAccounts.value.length
+      ? apiText('/api/checks/export?status=live&plan=plus&fmt=combo')
+      : Promise.resolve(''),
+  ])
+  freeOutput.value = free.trimEnd()
+  plusOutput.value = plus.trimEnd()
 }
 async function startChecks() {
   if (!lineCount.value) return showToast(t('common.noData'), 'danger')
@@ -96,7 +123,39 @@ async function clearResults() {
     await refreshChecks()
   } catch (error) { showToast(message(error), 'danger') }
 }
-function handleEvent(event: StreamEvent) { if (event.type === 'check' || event.type === 'batch') scheduleRefresh() }
+async function selectCheck(row: CheckRecord) {
+  if (selectedCheckId.value === row.id) return closeSelectedLog()
+  const request = ++selectedRequest
+  selectedCheckId.value = row.id
+  checkLogs.value = []
+  try {
+    const result = await apiJson<{ lines: string[] }>(`/api/checks/${row.id}/logs`)
+    if (request === selectedRequest && selectedCheckId.value === row.id) checkLogs.value = result.lines.slice(-500)
+  } catch (error) {
+    if (request === selectedRequest) showToast(message(error), 'danger')
+  }
+}
+function closeSelectedLog() {
+  selectedRequest += 1
+  selectedCheckId.value = null
+  checkLogs.value = []
+}
+async function copyCheckLog() {
+  await copyValue(checkLogs.value.join('\n'))
+}
+async function copyValue(value: string) {
+  if (!value.trim()) return showToast(t('toast.nothingToCopy'))
+  try {
+    await navigator.clipboard.writeText(value)
+    showToast(t('toast.copied', { count: lines(value).length }), 'success')
+  } catch (error) { showToast(message(error), 'danger') }
+}
+function handleEvent(event: StreamEvent) {
+  if (event.type === 'check_log' && event.line && event.check_id === selectedCheckId.value) {
+    checkLogs.value = [...checkLogs.value.slice(-499), event.line]
+  }
+  if (event.type === 'check' || event.type === 'batch') scheduleRefresh()
+}
 
 onMounted(async () => {
   unsubscribe = subscribeSse('checks', handleEvent)
@@ -112,7 +171,7 @@ onBeforeUnmount(() => { unsubscribe(); window.clearInterval(pollTimer); window.c
 </script>
 
 <template>
-  <div class="workspace checks-workspace" data-testid="checks-view">
+  <div class="workspace checks-workspace" data-testid="checks-view" @click="closeSelectedLog">
     <StatStrip :items="stats" />
     <div class="checks-layout">
       <UiPanel :title="t('checks.batch')" class="check-input-panel">
@@ -146,7 +205,11 @@ onBeforeUnmount(() => { unsubscribe(); window.clearInterval(pollTimer); window.c
           <table class="data-table check-table">
             <thead><tr><th>{{ t('checks.email') }}</th><th>{{ t('checks.plan') }}</th><th>{{ t('checks.mfa') }}</th><th>{{ t('checks.status') }}</th><th>{{ t('common.details') }}</th></tr></thead>
             <tbody>
-              <tr v-for="row in filteredChecks" :key="row.id">
+              <tr
+                v-for="row in filteredChecks" :key="row.id" :data-testid="`check-select-${row.id}`"
+                :class="{ selected: selectedCheckId === row.id }" tabindex="0"
+                @click.stop="selectCheck(row)" @keydown.enter.stop="selectCheck(row)"
+              >
                 <td :data-label="t('checks.email')" class="email-cell">{{ row.email }}</td>
                 <td :data-label="t('checks.plan')"><span v-if="row.status === 'live'" class="plan-badge">{{ row.plan || '?' }}<small v-if="row.has_subscription">SUB</small></span><span v-else class="muted">-</span></td>
                 <td :data-label="t('checks.mfa')"><span v-if="row.mfa_enabled" class="mfa-mark">2FA</span><span v-else class="muted">-</span></td>
@@ -157,6 +220,36 @@ onBeforeUnmount(() => { unsubscribe(); window.clearInterval(pollTimer); window.c
             </tbody>
           </table>
         </div>
+      </UiPanel>
+
+      <UiPanel :title="t('checks.accountGroups')" class="check-account-groups">
+        <div class="result-columns check-account-columns">
+          <div class="result-block">
+            <div>
+              <strong>{{ t('checks.freeAccounts') }}</strong>
+              <span class="count-chip">{{ freeAccounts.length }}</span>
+              <button class="icon-btn" data-testid="copy-free-accounts" type="button" :title="t('common.copy')" :aria-label="t('checks.copyFree')" @click="copyValue(freeOutput)"><Clipboard :size="15" /></button>
+            </div>
+            <textarea data-testid="free-accounts-output" class="result-output account-group-output" readonly :value="freeOutput" />
+          </div>
+          <div class="result-block">
+            <div>
+              <strong>{{ t('checks.plusAccounts') }}</strong>
+              <span class="count-chip">{{ plusAccounts.length }}</span>
+              <button class="icon-btn" data-testid="copy-plus-accounts" type="button" :title="t('common.copy')" :aria-label="t('checks.copyPlus')" @click="copyValue(plusOutput)"><Clipboard :size="15" /></button>
+            </div>
+            <textarea data-testid="plus-accounts-output" class="result-output account-group-output" readonly :value="plusOutput" />
+          </div>
+        </div>
+      </UiPanel>
+
+      <UiPanel :title="t('checks.activity')" class="check-activity-panel" @click.stop>
+        <template #actions>
+          <span class="panel-context">{{ selectedCheck?.email || t('checks.selectedCheck') }}</span>
+          <button v-if="selectedCheckId" class="icon-btn" data-testid="check-copy-log" type="button" :title="t('checks.copyLog')" :aria-label="t('checks.copyLog')" @click.stop="copyCheckLog"><Clipboard :size="16" /></button>
+        </template>
+        <pre v-if="checkLogs.length" class="log-view check-log-view">{{ checkLogs.join('\n') }}</pre>
+        <div v-else class="empty-state compact check-log-empty"><Terminal :size="20" /><span>{{ t('checks.noActivity') }}</span></div>
       </UiPanel>
     </div>
   </div>

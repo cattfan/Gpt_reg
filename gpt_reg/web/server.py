@@ -368,6 +368,11 @@ def list_jobs() -> list[dict[str, Any]]:
     return [_job_for_api(r) for r in jobs_repo.list_recent()]
 
 
+@app.get("/api/jobs/status")
+def jobs_status() -> JSONResponse:
+    return _no_store({"running": reg_manager.running})
+
+
 @app.get("/api/jobs/export")
 def export_jobs(
     fmt: str = "combo",
@@ -709,16 +714,44 @@ async def clear_checks(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/checks/export")
-def export_checks(status: str = "live") -> PlainTextResponse:
+def export_checks(
+    status: str = "live",
+    plan: str | None = None,
+    fmt: str = "summary",
+) -> PlainTextResponse:
     """Xuất `email|plan|2fa` cho các check đọc được plan.
 
     `status=live` chỉ account đăng nhập được; `status=all` tất cả (kèm cả lỗi để
     còn soi). Mỗi dòng: `email|plan|has_sub|mfa`.
     """
+    if status not in {"live", "all"}:
+        raise HTTPException(status_code=400, detail="invalid check export status")
+    if plan not in {None, "free", "plus"}:
+        raise HTTPException(status_code=400, detail="invalid check export plan")
+    if fmt not in {"summary", "combo"}:
+        raise HTTPException(status_code=400, detail="invalid check export format")
+
     if status == "all":
         rows = checks_repo.list_recent(limit=None)
     else:
         rows = checks_repo.list_by_status(("live",))
+    if plan:
+        rows = [
+            row
+            for row in rows
+            if plan
+            in f"{row.get('plan') or ''} {row.get('plan_detail') or ''}".lower()
+        ]
+
+    if fmt == "combo":
+        lines = [str(row.get("combo") or "").strip() for row in rows]
+        lines = [line for line in lines if line]
+        return PlainTextResponse(
+            "\n".join(lines) + ("\n" if lines else ""),
+            media_type="text/plain",
+            headers={"Cache-Control": "no-store"},
+        )
+
     lines = []
     for r in rows:
         plan = r.get("plan") or "?"
@@ -727,7 +760,11 @@ def export_checks(status: str = "live") -> PlainTextResponse:
         st = r.get("status")
         tail = plan if st == "live" else f"{st}:{(r.get('error') or '')[:40]}"
         lines.append(f"{r['email']}|{tail}|{sub}|{mfa}")
-    return PlainTextResponse("\n".join(lines) + ("\n" if lines else ""), media_type="text/plain")
+    return PlainTextResponse(
+        "\n".join(lines) + ("\n" if lines else ""),
+        media_type="text/plain",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/sse")

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { apiJson, presentApiError } from '../services/api'
+import { ApiRequestError, apiJson, presentApiError, putJson } from '../services/api'
 
 describe('api client', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -31,5 +31,21 @@ describe('api client', () => {
     const translate = (key: string) => labels[key] || key
 
     expect(presentApiError(new Error('Combo sai — dòng 2'), translate)).toBe('Invalid combo — dòng 2')
+  })
+
+  it('preserves structured line errors and supports JSON PUT requests', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('{"detail":{"line":2,"message":"bad proxy"}}', {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    })).mockResolvedValueOnce(new Response('{"ok":true}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const rejected = apiJson('/api/proxies')
+    await expect(rejected).rejects.toBeInstanceOf(ApiRequestError)
+    await expect(putJson('/api/proxies', { enabled: false, items: [] })).resolves.toEqual({ ok: true })
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'PUT' })
   })
 })

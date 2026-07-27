@@ -15,6 +15,23 @@ describe('UI regression contracts', () => {
   })
 
   it('uses an explicit high-contrast style for the selected language', () => {
-    expect(css).toMatch(/\.locale-segment button\.active\s*\{[^}]*background:\s*var\(--accent\)[^}]*color:\s*var\(--accent-contrast\)/s)
+    expect(css).toMatch(/\.locale-control select\s*\{[^}]*background:\s*var\(--surface-muted\)[^}]*color:\s*var\(--text\)/s)
+  })
+
+  it('lets the Jobs list fill its grid row without a hard-coded max height', () => {
+    expect(css).not.toMatch(/\.job-list\s*\{[^}]*max-height:\s*282px/s)
+    expect(css).toMatch(/\.batch-panel\s*\{[^}]*height:\s*520px/s)
+    expect(css).toMatch(/\.jobs-panel\s*\{[^}]*display:\s*flex[^}]*min-height:\s*0/s)
+    expect(css).toMatch(/\.jobs-panel\s*\{[^}]*height:\s*520px/s)
+    expect(css).toMatch(/\.job-list\s*\{[^}]*flex:\s*1[^}]*overflow:\s*auto/s)
+  })
+
+  it('keeps registration source controls scrollable on mobile', () => {
+    expect(css).toMatch(/\.source-segment\s*\{[^}]*overflow-x:\s*auto/s)
+  })
+
+  it('uses theme contrast tokens on solid action buttons', () => {
+    expect(css).toMatch(/\.btn\.primary\s*\{[^}]*color:\s*var\(--accent-contrast\)/s)
+    expect(css).toMatch(/\.btn\.danger\s*\{[^}]*color:\s*var\(--danger-contrast\)/s)
   })
 })
