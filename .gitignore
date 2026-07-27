@@ -1,0 +1,14 @@
+.venv/
+.venv311/
+__pycache__/
+*.py[cod]
+.env
+*.egg-info/
+dist/
+build/
+frontend/node_modules/
+.claude/
+.playwright-cli/
+output/
+runtime/*
+!runtime/.gitkeep

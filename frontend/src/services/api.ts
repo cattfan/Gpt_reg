@@ -1,0 +1,41 @@
+async function errorMessage(response: Response): Promise<string> {
+  try {
+    const payload = await response.json() as { detail?: unknown; error?: unknown }
+    const detail = payload.detail ?? payload.error
+    if (typeof detail === 'string' && detail.trim()) return detail
+    if (detail) return JSON.stringify(detail)
+  } catch { /* response is not JSON */ }
+  return `HTTP ${response.status}`
+}
+
+export async function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers)
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  const response = await fetch(path, { ...init, headers })
+  if (!response.ok) throw new Error(await errorMessage(response))
+  return response
+}
+
+export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await apiRequest(path, init)).json() as Promise<T>
+}
+
+export async function apiText(path: string): Promise<string> {
+  return (await apiRequest(path)).text()
+}
+
+export function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  return apiJson<T>(path, { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function presentApiError(error: unknown, translate: (key: string) => string): string {
+  const detail = error instanceof Error ? error.message.trim() : ''
+  if (detail === 'Chưa có combo nào.') return translate('errors.noCombos')
+  if (detail.startsWith('Nguồn Gmail chưa hỗ trợ')) return translate('errors.gmailUnavailable')
+  if (detail === 'job not found') return translate('errors.jobNotFound')
+  if (detail.startsWith('Combo sai')) {
+    const technical = detail.includes('—') ? detail.slice(detail.indexOf('—')) : ''
+    return `${translate('errors.invalidCombo')}${technical ? ` ${technical}` : ''}`
+  }
+  return detail ? `${translate('toast.requestFailed')}: ${detail}` : translate('toast.requestFailed')
+}

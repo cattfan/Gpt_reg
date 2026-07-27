@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt-reg"
+version = "0.1.0"
+description = "Camoufox ChatGPT registration with Outlook Graph mail"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "camoufox[geoip]==0.5.4",
+    "httpx[socks]>=0.27",
+    "pydantic>=2.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pyotp>=2.9",
+    "curl_cffi==0.15.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6"]
+
+[project.scripts]
+gpt-reg = "gpt_reg.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gpt_reg*"]
+
+[tool.setuptools.package-data]
+# Script Node cho sentinel QuickJS — không phải .py nên phải khai báo để pip
+# install thật đóng gói kèm (editable install thì đọc thẳng từ source).
+"gpt_reg.sentinel" = ["*.js"]
+"gpt_reg.web" = ["static/app/index.html", "static/app/assets/*"]
