@@ -8,7 +8,7 @@ from typing import Any
 _EXACT_KEYS: frozenset[str] = frozenset(
     {
         "proxy.pool",
-        "proxy.rotation_mode",
+        "proxy.enabled",
         "reg.headless",
         "reg.password",
         "reg.source",
@@ -16,6 +16,9 @@ _EXACT_KEYS: frozenset[str] = frozenset(
         "browser.geoip",
         "ui.theme",
         "web.port",
+        "accstack.api_key",
+        "mail.smsbower.alias_limit",
+        "mail.accstack.alias_limit",
         "sms.smsbower.api_key",
         "sms.smsbower.country",
     }
@@ -23,14 +26,14 @@ _EXACT_KEYS: frozenset[str] = frozenset(
 
 
 # Không bao giờ trả nguyên văn qua API — `all_known()` che lại.
-_SECRET_KEYS: frozenset[str] = frozenset({"sms.smsbower.api_key"})
+_SECRET_KEYS: frozenset[str] = frozenset({"accstack.api_key", "sms.smsbower.api_key"})
 
 # Giá trị che mà UI gửi ngược lên khi lưu form: bỏ qua, giữ giá trị cũ.
 MASKED_VALUE = "•" * 8
 
 
 def _validate_type(key: str, value: str | None) -> None:
-    if key in ("reg.headless", "browser.geoip") and value is not None:
+    if key in ("reg.headless", "browser.geoip", "proxy.enabled") and value is not None:
         if value not in ("0", "1", "true", "false", "yes", "no", "on", "off"):
             raise ValueError(f"{key} must be bool-like, got {value!r}")
     if key == "web.port" and value is not None:
@@ -75,13 +78,109 @@ class SettingsRepository:
         for key in sorted(_EXACT_KEYS):
             value = self.get(key)
             if key in _SECRET_KEYS and value:
-                out[key] = "•" * 8  # đủ để UI biết "đã đặt", không lộ giá trị
+                out[key] = MASKED_VALUE
             else:
                 out[key] = value
         return out
 
     def has_value(self, key: str) -> bool:
         return bool(self.get(key))
+
+
+class MailRentalRepository:
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._write_lock = threading.Lock()
+
+    def create(self, row: dict[str, Any]) -> None:
+        cols = ", ".join(row.keys())
+        placeholders = ", ".join("?" for _ in row)
+        with self._write_lock, self._conn:
+            self._conn.execute(
+                f"INSERT INTO mail_rentals ({cols}) VALUES ({placeholders})",
+                tuple(row.values()),
+            )
+
+    def get(self, rental_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM mail_rentals WHERE id = ?", (rental_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update(self, rental_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        with self._write_lock, self._conn:
+            self._conn.execute(
+                f"UPDATE mail_rentals SET {sets} WHERE id = ?",
+                (*fields.values(), rental_id),
+            )
+
+    def list_recent(self, limit: int | None = 500) -> list[dict[str, Any]]:
+        if limit is None:
+            rows = self._conn.execute(
+                "SELECT * FROM mail_rentals ORDER BY created_at DESC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM mail_rentals ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+class ProxyRepository:
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._write_lock = threading.Lock()
+
+    def list_all(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM proxies ORDER BY id").fetchall()
+        result = [dict(row) for row in rows]
+        for row in result:
+            row["selected"] = bool(row["selected"])
+        return result
+
+    def replace_all(self, rows: list[dict[str, Any]]) -> None:
+        from gpt_reg.proxy.format import materialize_proxy
+
+        normalized: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("proxy row must be an object")
+            value = row.get("value")
+            if not isinstance(value, str):
+                raise ValueError("proxy value must be a string")
+            value = value.strip()
+            materialize_proxy(value)
+            if value in seen:
+                raise ValueError(f"duplicate proxy value: {value!r}")
+            selected = row.get("selected", True)
+            if not isinstance(selected, bool):
+                raise ValueError("proxy selected must be bool")
+            seen.add(value)
+            normalized.append((value, selected))
+
+        with self._write_lock, self._conn:
+            if normalized:
+                marks = ", ".join("?" for _ in normalized)
+                self._conn.execute(
+                    f"DELETE FROM proxies WHERE value NOT IN ({marks})",
+                    tuple(value for value, _selected in normalized),
+                )
+            else:
+                self._conn.execute("DELETE FROM proxies")
+            for value, selected in normalized:
+                self._conn.execute(
+                    """
+                    INSERT INTO proxies (value, selected) VALUES (?, ?)
+                    ON CONFLICT(value) DO UPDATE SET
+                        selected = excluded.selected,
+                        updated_at = unixepoch('subsec')
+                    """,
+                    (value, int(selected)),
+                )
 
 
 class JobRepository:
@@ -349,6 +448,27 @@ class ChecksRepository:
     def get(self, check_id: str) -> dict[str, Any] | None:
         row = self._conn.execute("SELECT * FROM checks WHERE id = ?", (check_id,)).fetchone()
         return dict(row) if row else None
+
+    def append_log(self, check_id: str, line: str) -> None:
+        import time
+
+        with self._write_lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO check_logs (check_id, line, created_at) VALUES (?, ?, ?)",
+                (check_id, line, time.time()),
+            )
+
+    def logs(self, check_id: str, limit: int = 200) -> list[str]:
+        bounded_limit = max(0, min(limit, 500))
+        rows = self._conn.execute(
+            "SELECT line FROM check_logs WHERE check_id = ? ORDER BY id DESC LIMIT ?",
+            (check_id, bounded_limit),
+        ).fetchall()
+        return [str(row["line"]) for row in reversed(rows)]
+
+    def clear_logs(self, check_id: str) -> None:
+        with self._write_lock, self._conn:
+            self._conn.execute("DELETE FROM check_logs WHERE check_id = ?", (check_id,))
 
     def list_recent(self, limit: int | None = 500) -> list[dict[str, Any]]:
         if limit is None:
