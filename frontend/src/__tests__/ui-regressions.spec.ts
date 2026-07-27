@@ -40,6 +40,23 @@ describe('UI regression contracts', () => {
     expect(css).toMatch(/\.check-results-panel \.panel-body\s*\{[^}]*max-height:\s*62dvh/s)
   })
 
+  it('keeps tablet settings and check controls inside their panels', () => {
+    expect(css).toMatch(/\.integration-key-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/s)
+    expect(css).toMatch(/\.proxy-editor-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*\.9fr\)\s+minmax\(0,\s*1\.1fr\)/s)
+    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 1100px\)[\s\S]*\.checks-layout\s*\{[^}]*grid-template-columns:\s*minmax\(260px,/s)
+    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 1100px\)[\s\S]*\.table-toolbar\s*\{[^}]*flex-wrap:\s*wrap/s)
+    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 1100px\)[\s\S]*\.check-input-panel \.btn\s*\{[^}]*white-space:\s*nowrap/s)
+  })
+
+  it('compacts the rail without hiding language selection on narrow tablets', () => {
+    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 900px\)[\s\S]*\.app-shell\s*,\s*\.app-shell\.rail-collapsed\s*\{[^}]*grid-template-columns:\s*64px\s+minmax\(0,\s*1fr\)/s)
+    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 900px\)[\s\S]*\.mobile-locale\s*\{[^}]*display:\s*flex/s)
+  })
+
+  it('uses an internal workspace scroll fallback on unusually short screens', () => {
+    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-height: 540px\)[\s\S]*\.workspace\s*\{[^}]*overflow:\s*auto/s)
+  })
+
   it('uses theme contrast tokens on solid action buttons', () => {
     expect(css).toMatch(/\.btn\.primary\s*\{[^}]*color:\s*var\(--accent-contrast\)/s)
     expect(css).toMatch(/\.btn\.danger\s*\{[^}]*color:\s*var\(--danger-contrast\)/s)
