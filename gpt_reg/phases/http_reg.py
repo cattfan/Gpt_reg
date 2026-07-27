@@ -261,7 +261,7 @@ def _prime_chatgpt_session(session, log: Callable) -> None:
             return
     except Exception:
         pass
-    log("[http] [0/9] prime chatgpt.com (GET /auth/login)")
+    log("[http] [1/10] prime chatgpt.com (GET /auth/login)")
     # Không set Sec-Fetch-*/Accept-Encoding/Connection ở đây: curl_cffi đã gửi
     # đúng bộ điều hướng document theo impersonate, thêm tay là lệch vân tay.
     headers = _html_headers(session, "https://chatgpt.com/")
@@ -282,7 +282,7 @@ def _prime_chatgpt_session(session, log: Callable) -> None:
 
 def _step_csrf(session, log: Callable) -> str:
     _prime_chatgpt_session(session, log)
-    log("[http] [1/9] CSRF token")
+    log("[http] [2/10] CSRF token")
     headers = _common_headers(session, "https://chatgpt.com/auth/login")
     resp = None
     for attempt in range(3):
@@ -311,7 +311,7 @@ def _step_auth_url(
     login_hint: str = "",
     screen_hint: str = "login_or_signup",
 ) -> str:
-    log("[http] [2/9] authorize URL")
+    log("[http] [3/10] authorize URL")
     headers = _common_headers(session, "https://chatgpt.com/auth/login")
     headers["Content-Type"] = "application/x-www-form-urlencoded"
     params = {
@@ -355,7 +355,7 @@ def _step_oauth_init(session, auth_url: str, log: Callable) -> tuple[str, str]:
     KHÔNG tự dựng header `Sec-Fetch-*`: curl_cffi đã phát đúng bộ điều hướng
     document theo `impersonate` (xem docs/ANTIBOT.md).
     """
-    log("[http] [3/9] OAuth init")
+    log("[http] [4/10] OAuth init")
     resp = session.get(
         auth_url,
         headers=_html_headers(session, "https://chatgpt.com/auth/login"),
@@ -633,7 +633,7 @@ def _step_mfa_challenge(
 
 
 def _step_send_otp(session, device_id: str, log: Callable) -> None:
-    log("[http] [5/9] send OTP")
+    log("[http] send OTP")
     headers = _common_headers(session, "https://auth.openai.com/create-account/password")
     if device_id:
         headers["oai-device-id"] = device_id
@@ -698,7 +698,7 @@ def _send_initial_otp(
 
 def _step_verify_otp(session, otp_code: str, device_id: str, log: Callable) -> dict:
     """Return dict kèm _ok/_status/_body — caller tự quyết retry."""
-    log("[http] [7/9] verify OTP")
+    log("[http] verify OTP")
     headers = _common_headers(session, "https://auth.openai.com/email-verification")
     headers["Content-Type"] = "application/json"
     if device_id:
@@ -758,7 +758,7 @@ def _step_create_account(
     session, name: str, birthdate: str, device_id: str, log: Callable,
     sentinel_token: str | None = None, worker=None,
 ) -> str:
-    log("[http] [8/9] create_account")
+    log("[http] create_account")
     sentinel = sentinel_token or _get_sentinel_token(session, device_id, "create_account", log, worker=worker)
     headers = _common_headers(session, "https://auth.openai.com/about-you")
     headers["Content-Type"] = "application/json"
@@ -795,7 +795,7 @@ def _step_create_account(
 
 
 def _step_follow_redirects(session, start_url: str, log: Callable, should_cancel=None) -> str:
-    log(f"[http] [9/9] follow redirects ← {start_url.split('?')[0][:70]}")
+    log(f"[http] [10/10] follow redirects ← {start_url.split('?')[0][:70]}")
     current = start_url
     callback_url = ""
     for _ in range(12):
@@ -975,6 +975,7 @@ def _run_flow(
         log(f"[http] landing={landing_kind} ({landing.split('?')[0][:70]})")
         if landing_kind == "login":
             # Màn nhập mật khẩu → xác thực bằng mật khẩu đã biết.
+            log("[http] [5/10] identify existing account (password)")
             log(f"[http] {request.email} đã có tài khoản → đăng nhập bằng mật khẩu")
             login_mode = True
             login_kind = "password"
@@ -983,6 +984,7 @@ def _run_flow(
             # Màn verify email → server muốn MÃ, không phải mật khẩu. Gọi
             # `password/verify` ở trạng thái này bị 409 invalid_state (đo thật).
             # Đây cũng là trạng thái của account đăng ký nửa chừng.
+            log("[http] [5/10] identify existing account (OTP)")
             log(f"[http] {request.email} cần verify email → đăng nhập bằng mã OTP")
             login_mode = True
             login_kind = "otp"
@@ -1009,7 +1011,7 @@ def _run_flow(
         except Exception:
             pass
 
-        log(f"[http] [4/9] register account (email={request.email})")
+        log(f"[http] [5/10] register account (email={request.email})")
         reg_headers = _common_headers(session, "https://auth.openai.com/create-account/password")
         reg_headers["Content-Type"] = "application/json"
         if device_id:
@@ -1123,6 +1125,10 @@ def _run_flow(
     if login_mode and not needs_otp_after_login:
         _cancel_point("http_login_finish")
         log("[http] đã có phiên đăng nhập — bỏ qua OTP và create_account")
+        log("[http] [6/10] skipped: existing authenticated session")
+        log("[http] [7/10] skipped: OTP wait not required")
+        log("[http] [8/10] skipped: OTP verify not required")
+        log("[http] [9/10] skipped: existing account profile")
         callback_url = _step_follow_redirects(
             session, reg_continue or "https://chatgpt.com/", log,
             should_cancel=ctx.should_cancel,
@@ -1171,7 +1177,7 @@ def _run_flow(
         cold_passwordless=login_mode and login_kind == "otp",
         reg_continue=reg_continue,
     )
-    log("[http] OTP sent")
+    log("[http] [6/10] OTP sent")
 
     # Pre-compute sentinel create_account song song với lúc chờ OTP.
     #
@@ -1210,7 +1216,7 @@ def _run_flow(
     # Poll + verify với resend khi sai mã.
     consumed: set[str] = set()
     _cancel_point("http_otp")
-    log("[http] [6/9] chờ OTP")
+    log("[http] [7/10] chờ OTP")
     otp_code, waited = _poll_otp(mail, request, otp_since, consumed, ctx.should_cancel, log)
     otp_seconds += waited
     pre_thread.join(timeout=45.0)
@@ -1222,6 +1228,7 @@ def _run_flow(
 
     max_verify = 3
     verified = False
+    log("[http] [8/10] verify OTP")
     for v_attempt in range(1, max_verify + 1):
         _cancel_point("http_verify")
         otp_resp = _step_verify_otp(session, otp_code, device_id, log)
@@ -1268,11 +1275,13 @@ def _run_flow(
     # không tốn sentinel), chỉ gọi create_account khi KHÔNG ra được session.
     _cancel_point("http_finalize")
     if login_mode:
+        log("[http] [9/10] resolve existing account profile")
         page = otp_resp.get("page")
         otp_page = ((page or {}).get("type") or "").strip().lower() if isinstance(page, dict) else ""
         continue_url = (otp_resp.get("continue_url") or "").strip() or "https://chatgpt.com/"
         log(f"[http] account cũ (page={otp_page!r}) — thử lấy session trước")
     else:
+        log("[http] [9/10] create account profile")
         continue_url = _step_create_account(
             session, request.name, request.birthdate, device_id, log,
             sentinel_token=precomputed.get("token"), worker=worker,

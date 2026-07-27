@@ -38,7 +38,7 @@ _LOG_OTP_RE = re.compile(r"(?i)(\bOTP\s+)\d{4,10}\b")
 _LOG_SECRET_ASSIGN_RE = re.compile(
     r"(?i)(?P<prefix>[\"']?(?:access[_-]?token|refresh[_-]?token|session[_-]?token|"
     r"factor_id|password|secret|token|code|otp|screenshot|session_path)[\"']?\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)(?P<value>[^\"'\s,;}\]]+)(?P=quote)"
+    r"(?P<quote>[\"']?)(?P<value>[^\"'\s,;}\]]+)(?P=quote)\]?"
 )
 _LOG_SESSION_PATH_RE = re.compile(r"(?i)^(\[signup\]\s+session saved)(?:\s+.+)?$")
 _LOG_URL_QUERY_RE = re.compile(r"(?i)(https?://[^\s?#]+)\?[^\s#]*(?:#[^\s]*)?")

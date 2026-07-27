@@ -18,6 +18,7 @@ from gpt_reg.checker.combo import CheckCombo, CheckComboError
 from gpt_reg.checker.flow import CheckError, check_account
 from gpt_reg.core.exceptions import JobCancelledError
 from gpt_reg.proxy.pool import ProxyPool
+from gpt_reg.web.jobs.reg_manager import sanitize_job_log_line
 
 CHECK_CONCURRENCY_CHOICES = (1, 2, 5, 10, 20, 50, 100, 200)
 MAX_CONCURRENCY_CHECK = 200
@@ -114,6 +115,7 @@ class CheckManager:
             for cid in ids:
                 with self._lock:
                     self._cancelled.discard(cid)
+                checks_repo.clear_logs(cid)
                 checks_repo.update(
                     cid, status="queued", error=None, plan=None, plan_detail=None,
                     has_subscription=0, expires_at=None, deactivated=0,
@@ -194,8 +196,9 @@ class CheckManager:
         self._emit({"type": "check", "check_id": cid, "status": "running", "email": row["email"]})
 
         def log(line: str) -> None:
-            # Check nhanh nên không lưu log từng dòng vào DB; chỉ đẩy SSE để xem live.
-            self._emit({"type": "check_log", "check_id": cid, "line": line})
+            public_line = sanitize_job_log_line(line)
+            checks_repo.append_log(cid, public_line)
+            self._emit({"type": "check_log", "check_id": cid, "line": public_line})
 
         from gpt_reg.sentinel.pool import get_pool
 
@@ -236,6 +239,8 @@ class CheckManager:
                 self._running.discard(cid)
 
     def _finish(self, checks_repo, check_id: str, *, status: str, **fields: Any) -> None:
+        if fields.get("error") is not None:
+            fields["error"] = sanitize_job_log_line(str(fields["error"]))
         checks_repo.update(check_id, status=status, finished_at=time.time(), **fields)
         with self._lock:
             self._cancelled.discard(check_id)
