@@ -98,7 +98,7 @@ onBeforeUnmount(disconnectSse)
         <div class="page-heading"><h1>{{ page.title }}</h1><p>{{ page.subtitle }}</p></div>
         <label class="mobile-locale">
           <Languages :size="16" aria-hidden="true" />
-          <select data-testid="locale-select-mobile" :value="preferences.locale.value" @change="changeLocale">
+          <select data-testid="locale-select-mobile" :aria-label="t('common.language')" :value="preferences.locale.value" @change="changeLocale">
             <option value="vi">VI</option><option value="en">EN</option><option value="zh-CN">中文</option>
           </select>
         </label>

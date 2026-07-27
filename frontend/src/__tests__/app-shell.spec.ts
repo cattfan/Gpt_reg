@@ -50,4 +50,10 @@ describe('application shell', () => {
     expect(wrapper.text()).toContain('Account check')
     expect(document.documentElement.lang).toBe('en')
   })
+
+  it('names the compact language selector for assistive technology', () => {
+    const wrapper = mountApp()
+
+    expect(wrapper.get('[data-testid="locale-select-mobile"]').attributes('aria-label')).toBe('Ngôn ngữ')
+  })
 })

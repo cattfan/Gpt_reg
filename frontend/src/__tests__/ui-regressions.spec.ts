@@ -54,7 +54,7 @@ describe('UI regression contracts', () => {
   })
 
   it('uses an internal workspace scroll fallback on unusually short screens', () => {
-    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-height: 540px\)[\s\S]*\.workspace\s*\{[^}]*overflow:\s*auto/s)
+    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-height: 560px\)[\s\S]*\.workspace\s*\{[^}]*overflow:\s*auto/s)
   })
 
   it('uses theme contrast tokens on solid action buttons', () => {

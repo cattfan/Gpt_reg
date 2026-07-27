@@ -276,7 +276,7 @@ input { min-height: 34px; padding: 6px 9px; }
   .proxy-toolbar { min-height: 45px; padding-block: 6px; }
 }
 
-@media (min-width: 761px) and (max-height: 540px) {
+@media (min-width: 761px) and (max-height: 560px) {
   .workspace { overflow: auto; }
 }
 
