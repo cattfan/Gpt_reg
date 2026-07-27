@@ -795,7 +795,7 @@ def _step_create_account(
 
 
 def _step_follow_redirects(session, start_url: str, log: Callable, should_cancel=None) -> str:
-    log(f"[http] [10/10] follow redirects ← {start_url.split('?')[0][:70]}")
+    log(f"[http] follow redirects ← {start_url.split('?')[0][:70]}")
     current = start_url
     callback_url = ""
     for _ in range(12):
@@ -1129,6 +1129,7 @@ def _run_flow(
         log("[http] [7/10] skipped: OTP wait not required")
         log("[http] [8/10] skipped: OTP verify not required")
         log("[http] [9/10] skipped: existing account profile")
+        log("[http] [10/10] resolve callback/session")
         callback_url = _step_follow_redirects(
             session, reg_continue or "https://chatgpt.com/", log,
             should_cancel=ctx.should_cancel,
@@ -1286,9 +1287,15 @@ def _run_flow(
             session, request.name, request.birthdate, device_id, log,
             sentinel_token=precomputed.get("token"), worker=worker,
         )
+    finish_checkpoint_logged = False
+
     def _finish(url: str) -> tuple[str, str, str, str]:
+        nonlocal finish_checkpoint_logged
         # Kiểm huỷ trước và trong chuỗi redirect: tới 12 GET tuần tự × 30s.
         _cancel_point("http_redirect")
+        if not finish_checkpoint_logged:
+            log("[http] [10/10] resolve callback/session")
+            finish_checkpoint_logged = True
         cb = _step_follow_redirects(session, url, log, should_cancel=ctx.should_cancel)
         if cb:
             _consume_callback(session, cb, log)

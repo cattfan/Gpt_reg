@@ -28,6 +28,10 @@ def main() -> int:
     for index in range(1, 11):
         if f"[{index}/10]" not in source:
             failures.append(f"missing HTTP checkpoint {index}/10")
+    if "[10/10] follow redirects" in source:
+        failures.append("redirect helper can emit checkpoint 10 more than once")
+    if source.count("[10/10]") != 2:
+        failures.append("checkpoint 10 must be emitted once in each exclusive finish branch")
     for index in (6, 7, 8, 9):
         if f'[{index}/10] skipped:' not in source:
             failures.append(f"existing-session branch does not skip checkpoint {index}")
