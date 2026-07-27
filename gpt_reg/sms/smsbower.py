@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 BASE_URL = "https://smsbower.online/stubs/handler_api.php"
+MAIL_BASE_URL = "https://smsbower.page/api/mail"
 
 # Mã dịch vụ theo chuẩn SMS-activate.
 SERVICE_GOOGLE = "go"
@@ -48,13 +49,27 @@ class Activation:
     phone: str
 
 
+@dataclass(frozen=True)
+class MailActivation:
+    activation_id: str
+    email: str
+
+
 class SmsBowerClient:
-    def __init__(self, api_key: str, *, proxy_url: str | None = None, timeout: float = 25.0):
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        proxy_url: str | None = None,
+        timeout: float = 25.0,
+        transport: httpx.BaseTransport | None = None,
+    ):
         if not api_key or not api_key.strip():
             raise SmsBowerError("thiếu API key SMSBower")
         self._key = api_key.strip()
         self._proxy = proxy_url
         self._timeout = timeout
+        self._transport = transport
 
     # ── transport ────────────────────────────────────────────────────────
 
@@ -62,10 +77,14 @@ class SmsBowerClient:
         query = {"api_key": self._key, "action": action}
         query.update({k: str(v) for k, v in params.items() if v is not None})
         try:
-            with httpx.Client(proxy=self._proxy, timeout=self._timeout) as client:
+            with httpx.Client(
+                proxy=self._proxy,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
                 response = client.get(BASE_URL, params=query)
         except Exception as exc:
-            raise SmsBowerError(f"{action}: lỗi mạng {type(exc).__name__}: {exc}") from exc
+            raise SmsBowerError(f"{action}: lỗi mạng {type(exc).__name__}") from exc
         if response.status_code != 200:
             raise SmsBowerError(f"{action}: HTTP {response.status_code}")
         text = (response.text or "").strip()
@@ -82,6 +101,30 @@ class SmsBowerClient:
             return json.loads(text)
         except Exception as exc:
             raise SmsBowerError(f"{action}: response không phải JSON: {text[:120]}") from exc
+
+    def _mail_call(self, operation: str, **params: Any) -> dict[str, Any]:
+        query = {"api_key": self._key}
+        query.update({key: str(value) for key, value in params.items() if value is not None})
+        try:
+            with httpx.Client(
+                proxy=self._proxy,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = client.get(f"{MAIL_BASE_URL}/{operation}", params=query)
+        except Exception as exc:
+            raise SmsBowerError(
+                f"mail/{operation}: lỗi mạng {type(exc).__name__}"
+            ) from exc
+        if response.status_code != 200:
+            raise SmsBowerError(f"mail/{operation}: HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise SmsBowerError(f"mail/{operation}: response không phải JSON") from exc
+        if not isinstance(payload, dict):
+            raise SmsBowerError(f"mail/{operation}: kiểu dữ liệu lạ")
+        return payload
 
     # ── số dư & tồn kho ──────────────────────────────────────────────────
 
@@ -177,3 +220,67 @@ class SmsBowerClient:
             self.set_status(activation_id, 6)
         except SmsBowerError:
             pass
+
+    # ── temporary mail ──────────────────────────────────────────────────
+
+    def get_mail_price_rests(
+        self,
+        *,
+        service: str,
+        domain: str,
+    ) -> tuple[float, int]:
+        payload = self._mail_call("getPriceRests", service=service, domain=domain)
+        if int(payload.get("status") or 0) != 1:
+            raise SmsBowerError(f"getPriceRests: {str(payload.get('error') or 'error')[:120]}")
+        data = payload.get("data")
+        entry = None
+        if isinstance(data, dict):
+            service_data = data.get(service)
+            if isinstance(service_data, dict):
+                entry = service_data.get(domain)
+            if not isinstance(entry, dict):
+                for candidate in data.values():
+                    if isinstance(candidate, dict) and isinstance(candidate.get(domain), dict):
+                        entry = candidate[domain]
+                        break
+        if not isinstance(entry, dict):
+            raise SmsBowerError("getPriceRests: thiếu price/count")
+        try:
+            return float(entry["price"]), int(entry["count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SmsBowerError("getPriceRests: price/count không hợp lệ") from exc
+
+    def rent_mail(
+        self,
+        *,
+        service: str,
+        domain: str,
+        alias: bool = False,
+    ) -> MailActivation:
+        payload = self._mail_call(
+            "getActivation",
+            service=service,
+            domain=domain,
+            alias=1 if alias else 0,
+        )
+        if int(payload.get("status") or 0) != 1:
+            raise SmsBowerError(f"getActivation: {str(payload.get('error') or 'error')[:120]}")
+        email = str(payload.get("mail") or "").strip()
+        activation_id = str(payload.get("mailId") or "").strip()
+        if not email or not activation_id:
+            raise SmsBowerError("getActivation: thiếu mail/mailId")
+        return MailActivation(activation_id=activation_id, email=email)
+
+    def get_mail_code(self, activation_id: str) -> str | None:
+        payload = self._mail_call("getCode", mailId=activation_id)
+        if int(payload.get("status") or 0) == 1:
+            return str(payload.get("code") or "").strip() or None
+        error = str(payload.get("error") or "error")
+        if "not been received yet" in error.lower():
+            return None
+        raise SmsBowerError(f"getCode: {error[:120]}")
+
+    def set_mail_status(self, activation_id: str, status: int) -> None:
+        payload = self._mail_call("setStatus", id=activation_id, status=status)
+        if int(payload.get("status") or 0) != 1:
+            raise SmsBowerError(f"setStatus: {str(payload.get('error') or 'error')[:120]}")
