@@ -36,9 +36,10 @@ describe('operational views', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.includes('/api/limits')) return ok({ concurrency_choices: [1, 5], max_browser: 5, max_http: 5, check_concurrency_choices: [1, 5], max_check: 5 })
-      if (url.includes('/api/settings')) return ok({ 'reg.source': 'outlook', 'sms.smsbower.api_key': null, 'accstack.api_key': null })
+      if (url.endsWith('/api/settings/integration-keys')) return ok({ 'sms.smsbower.api_key': 'sms-secret', 'accstack.api_key': 'acc-secret' })
+      if (url.includes('/api/settings')) return ok({ 'reg.source': 'outlook' })
       if (url.includes('/api/mail-sources/status')) return ok({ configured: true, balance: 500, currency: 'USD', price: 50, stock: 10, affordable: 10, products: [{ id: '5', name: 'Gmail OpenAI', price: 50, stock: 10 }] })
-      if (url.endsWith('/api/proxies')) return ok({ enabled: false, items: [], selected: 0, total: 0 })
+      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: [{ id: 1, value: 'proxy.example:8000', selected: true }], selected: 1, total: 1 })
       if (url.includes('/api/sms/status')) return ok({ configured: false })
       if (url.endsWith('/api/jobs/status')) return ok({ running: false })
       if (url.endsWith('/api/jobs')) return ok([
@@ -219,6 +220,7 @@ describe('operational views', () => {
       const url = String(input)
       if (url.includes('/api/limits')) return ok({ concurrency_choices: [1, 10, 50], max_browser: 10, max_http: 200, check_concurrency_choices: [1], max_check: 1 })
       if (url.includes('/api/settings')) return ok({ 'reg.source': 'outlook' })
+      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: [{ id: 1, value: 'proxy.example:8000', selected: true }], selected: 1, total: 1 })
       if (url.endsWith('/api/jobs')) return ok([
         { id: 'job-error', email: 'failed@example.com', status: 'error', reg_mode: 'http', error: 'failed' },
       ])
@@ -246,12 +248,20 @@ describe('operational views', () => {
     expect(JSON.parse(String(retryCall?.[1]?.body))).toMatchObject({ fallback_enabled: true })
   })
 
-  it('uses the per-run proxy choice for registration status, start and retry', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+  it('persists registration proxy rows and uses the selected pool for status, start and retry', async () => {
+    let proxyItems = [
+      { id: 1, value: 'one.example:8001', selected: true },
+      { id: 2, value: 'two.example:8002', selected: false },
+    ]
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.includes('/api/limits')) return ok({ concurrency_choices: [1], max_browser: 1, max_http: 1, check_concurrency_choices: [1], max_check: 1 })
       if (url.includes('/api/settings')) return ok({ 'reg.source': 'outlook' })
-      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: [], selected: 0, total: 0 })
+      if (url.endsWith('/api/proxies') && init?.method === 'PUT') {
+        proxyItems = JSON.parse(String(init.body)).items
+        return ok({ enabled: true, items: proxyItems, selected: proxyItems.filter((item) => item.selected).length, total: proxyItems.length })
+      }
+      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: proxyItems, selected: 1, total: 2 })
       if (url.endsWith('/api/jobs/status')) return ok({ running: false })
       if (url.endsWith('/api/jobs')) return ok([{ id: 'job-error', email: 'failed@example.com', status: 'error', error: 'failed' }])
       if (url.includes('/api/mail-sources/status')) return ok({ configured: true, balance: 500, currency: 'USD', price: 50, stock: 10, affordable: 10, products: [] })
@@ -262,33 +272,44 @@ describe('operational views', () => {
     const wrapper = mountView(RegistrationView)
     await flushPromises()
 
-    const proxyToggle = wrapper.get('[data-testid="registration-proxy-enabled"]')
-    expect((proxyToggle.element as HTMLInputElement).checked).toBe(true)
-    expect(proxyToggle.element.parentElement?.textContent).toContain('Dùng proxy')
+    const firstProxy = wrapper.get('[data-testid="registration-proxy-selected-0"]')
+    const secondProxy = wrapper.get('[data-testid="registration-proxy-selected-1"]')
+    expect((firstProxy.element as HTMLInputElement).checked).toBe(true)
+    expect(firstProxy.attributes('disabled')).toBeDefined()
+    expect((secondProxy.element as HTMLInputElement).checked).toBe(false)
+    expect(wrapper.find('[data-testid="registration-proxy-enabled"]').exists()).toBe(false)
+
+    await secondProxy.setValue(true)
+    await flushPromises()
+    expect(firstProxy.attributes('disabled')).toBeUndefined()
+    await firstProxy.setValue(false)
+    await flushPromises()
+    expect(secondProxy.attributes('disabled')).toBeDefined()
+    const proxyCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) => String(url).endsWith('/api/proxies') && options?.method === 'PUT')
+    expect(JSON.parse(String(proxyCalls.at(-1)?.[1]?.body))).toEqual({
+      items: [
+        { value: 'one.example:8001', selected: false },
+        { value: 'two.example:8002', selected: true },
+      ],
+    })
 
     await wrapper.get('[data-testid="source-gmail_smsbower"]').trigger('click')
     await flushPromises()
     const statusCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes('/api/mail-sources/status'))
     expect(String(statusCall?.[0])).toContain('source=gmail_smsbower')
-    expect(String(statusCall?.[0])).toContain('proxy_enabled=true')
-
-    await proxyToggle.setValue(false)
-    await flushPromises()
-    const statusCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/mail-sources/status'))
-    expect(String(statusCalls.at(-1)?.[0])).toContain('proxy_enabled=false')
+    expect(String(statusCall?.[0])).not.toContain('proxy_enabled')
 
     await wrapper.get('[data-testid="source-outlook"]').trigger('click')
     await wrapper.get('[data-testid="outlook-input"]').setValue('mail@example.com|pass|refresh|client')
     await wrapper.get('[data-testid="registration-run"]').trigger('click')
     await flushPromises()
     const startCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/jobs/start'))
-    expect(JSON.parse(String(startCall?.[1]?.body))).toMatchObject({ proxy_enabled: false })
+    expect(JSON.parse(String(startCall?.[1]?.body))).not.toHaveProperty('proxy_enabled')
 
-    await proxyToggle.setValue(true)
     await wrapper.get('[data-testid="job-retry-job-error"]').trigger('click')
     await flushPromises()
     const retryCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/jobs/retry'))
-    expect(JSON.parse(String(retryCall?.[1]?.body))).toMatchObject({ proxy_enabled: true })
+    expect(JSON.parse(String(retryCall?.[1]?.body))).not.toHaveProperty('proxy_enabled')
   })
 
   it('formats AccStack balance and price with its currency divisor', async () => {
@@ -377,11 +398,19 @@ describe('operational views', () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('plus@example.com|PlusPass|PLUS2FA')
   })
 
-  it('uses the per-run proxy choice for check start and retry', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+  it('persists check proxy rows and uses the selected pool for start and retry', async () => {
+    let proxyItems = [
+      { id: 1, value: 'one.example:8001', selected: true },
+      { id: 2, value: 'two.example:8002', selected: false },
+    ]
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.includes('/api/limits')) return ok({ concurrency_choices: [1], max_browser: 1, max_http: 1, check_concurrency_choices: [1], max_check: 1 })
-      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: [], selected: 0, total: 0 })
+      if (url.endsWith('/api/proxies') && init?.method === 'PUT') {
+        proxyItems = JSON.parse(String(init.body)).items
+        return ok({ enabled: true, items: proxyItems, selected: proxyItems.filter((item) => item.selected).length, total: proxyItems.length })
+      }
+      if (url.endsWith('/api/proxies')) return ok({ enabled: true, items: proxyItems, selected: 1, total: 2 })
       if (url.endsWith('/api/checks/start')) return ok({ check_ids: ['check-1'] })
       if (url.endsWith('/api/checks/retry')) return ok({ check_ids: ['check-2'] })
       if (url.endsWith('/api/checks')) return ok([])
@@ -390,28 +419,42 @@ describe('operational views', () => {
     const wrapper = mountView(CheckAccountsView)
     await flushPromises()
 
-    const proxyToggle = wrapper.get('[data-testid="checks-proxy-enabled"]')
-    expect((proxyToggle.element as HTMLInputElement).checked).toBe(true)
-    expect(proxyToggle.element.parentElement?.textContent).toContain('Dùng proxy')
+    const firstProxy = wrapper.get('[data-testid="checks-proxy-selected-0"]')
+    const secondProxy = wrapper.get('[data-testid="checks-proxy-selected-1"]')
+    expect(firstProxy.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="checks-proxy-enabled"]').exists()).toBe(false)
+
+    await secondProxy.setValue(true)
+    await flushPromises()
+    await firstProxy.setValue(false)
+    await flushPromises()
+    expect(secondProxy.attributes('disabled')).toBeDefined()
+    const proxyCall = vi.mocked(fetch).mock.calls.filter(([url, options]) => String(url).endsWith('/api/proxies') && options?.method === 'PUT').at(-1)
+    expect(JSON.parse(String(proxyCall?.[1]?.body))).toEqual({
+      items: [
+        { value: 'one.example:8001', selected: false },
+        { value: 'two.example:8002', selected: true },
+      ],
+    })
 
     await wrapper.get('textarea').setValue('mail@example.com|pass|2fa')
-    await proxyToggle.setValue(false)
     await wrapper.get('[data-testid="checks-run"]').trigger('click')
     await flushPromises()
     const startCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/checks/start'))
-    expect(JSON.parse(String(startCall?.[1]?.body))).toMatchObject({ proxy_enabled: false })
+    expect(JSON.parse(String(startCall?.[1]?.body))).not.toHaveProperty('proxy_enabled')
 
-    await proxyToggle.setValue(true)
     await wrapper.get('.check-results-panel .panel-actions button').trigger('click')
     await flushPromises()
     const retryCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/checks/retry'))
-    expect(JSON.parse(String(retryCall?.[1]?.body))).toMatchObject({ proxy_enabled: true })
+    expect(JSON.parse(String(retryCall?.[1]?.body))).not.toHaveProperty('proxy_enabled')
   })
 
   it('renders integrations and selectable random proxy settings without Appearance', async () => {
     const wrapper = mountView(SettingsView)
     await flushPromises()
-    expect(wrapper.findAll('input[type="password"]')).toHaveLength(2)
+    expect(wrapper.get('[data-testid="smsbower-api-key"]').attributes('type')).toBe('text')
+    expect(wrapper.get('[data-testid="accstack-api-key"]').attributes('type')).toBe('text')
+    expect(wrapper.find('[data-testid="proxy-enabled"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="settings-section-nav"]').exists()).toBe(false)
     expect(wrapper.findAll('[data-testid^="integration-card-"]')).toHaveLength(2)
     expect(wrapper.get('[data-testid="settings-integrations-grid"]').classes()).toContain('settings-integrations-grid')
@@ -423,38 +466,41 @@ describe('operational views', () => {
     expect(wrapper.text()).not.toContain('Round robin')
   })
 
-  it('only reveals an integration API key when the input is non-empty', async () => {
+  it('loads raw API keys visibly and the eye only toggles their visibility', async () => {
     const wrapper = mountView(SettingsView)
     await flushPromises()
 
     const input = wrapper.get('[data-testid="smsbower-api-key"]')
     const toggle = wrapper.get('[data-testid="smsbower-api-key-toggle"]')
-    expect(input.attributes('type')).toBe('password')
-    expect(toggle.attributes('disabled')).toBeDefined()
-
-    await input.setValue('secret-key')
+    expect((input.element as HTMLInputElement).value).toBe('sms-secret')
+    expect(input.attributes('type')).toBe('text')
     expect(toggle.attributes('disabled')).toBeUndefined()
     await toggle.trigger('click')
-    expect(input.attributes('type')).toBe('text')
-    await input.setValue('   ')
     expect(input.attributes('type')).toBe('password')
-    expect(toggle.attributes('disabled')).toBeDefined()
+    expect((input.element as HTMLInputElement).value).toBe('sms-secret')
+    await toggle.trigger('click')
+    await input.setValue('updated-secret')
+    await wrapper.get('[data-testid="integration-card-smsbower"] form').trigger('submit')
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('updated-secret')
+    const saveCall = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith('/api/settings') && init?.method === 'POST')
+    expect(JSON.parse(String(saveCall?.[1]?.body))).toEqual({ 'sms.smsbower.api_key': 'updated-secret' })
   })
 
-  it('saves proxy toggle, parsed rows and selected subset', async () => {
+  it('saves proxy rows without a global toggle and locks the final selected row', async () => {
     const wrapper = mountView(SettingsView)
     await flushPromises()
 
-    await wrapper.get('[data-testid="proxy-enabled"]').setValue(true)
+    expect(wrapper.find('[data-testid="proxy-enabled"]').exists()).toBe(false)
     await wrapper.get('[data-testid="proxy-editor"]').setValue('one.example:8001\ntwo.example:8002')
-    await wrapper.get('[data-testid="proxy-selected-1"]').setValue(true)
+    await wrapper.get('[data-testid="proxy-selected-0"]').setValue(false)
     expect(wrapper.text()).toContain('1 / 2')
+    expect(wrapper.get('[data-testid="proxy-selected-1"]').attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid="proxy-save"]').trigger('click')
     await flushPromises()
 
     const proxyCall = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith('/api/proxies') && init?.method === 'PUT')
     expect(JSON.parse(String(proxyCall?.[1]?.body))).toEqual({
-      enabled: true,
       items: [
         { value: 'one.example:8001', selected: false },
         { value: 'two.example:8002', selected: true },

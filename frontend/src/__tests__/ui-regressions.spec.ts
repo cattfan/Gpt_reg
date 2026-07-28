@@ -54,6 +54,11 @@ describe('UI regression contracts', () => {
     expect(css).toMatch(/\.password-field button\s*\{[^}]*border-radius:\s*0 6px 6px 0/s)
   })
 
+  it('bounds runtime proxy lists inside the single-screen workspaces', () => {
+    expect(css).toMatch(/\.runtime-proxy-picker\s*\{[^}]*max-height:\s*112px[^}]*overflow:\s*hidden/s)
+    expect(css).toMatch(/\.runtime-proxy-picker \.proxy-list\s*\{[^}]*overflow:\s*auto/s)
+  })
+
   it('compacts the rail without hiding language selection on narrow tablets', () => {
     expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 900px\)[\s\S]*\.app-shell\s*,\s*\.app-shell\.rail-collapsed\s*\{[^}]*grid-template-columns:\s*64px\s+minmax\(0,\s*1fr\)/s)
     expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 900px\)[\s\S]*\.mobile-locale\s*\{[^}]*display:\s*flex/s)

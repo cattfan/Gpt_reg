@@ -96,6 +96,9 @@ def main() -> int:
     repositories["settings_repo"].set("proxy.enabled", "false")
     repositories["settings_repo"].set("sms.smsbower.api_key", "fixture-key")
     repositories["settings_repo"].set("accstack.api_key", "fixture-key")
+    repositories["proxy_repo"].replace_all(
+        [{"value": "bootstrap.example:7999", "selected": True}]
+    )
     client = TestClient(server.app)
 
     try:
@@ -127,7 +130,6 @@ def main() -> int:
         response = client.put(
             "/api/proxies",
             json={
-                "enabled": True,
                 "items": [
                     {"value": "one.example:8001", "selected": True},
                     {"value": "two.example:8002", "selected": False},
@@ -143,7 +145,6 @@ def main() -> int:
         invalid = client.put(
             "/api/proxies",
             json={
-                "enabled": True,
                 "items": [
                     {"value": "new.example:9001", "selected": True},
                     {"value": "not-a-proxy", "selected": True},
@@ -154,9 +155,22 @@ def main() -> int:
             failures.append("invalid proxy line did not return HTTP 400")
         if repositories["proxy_repo"].list_all() != before:
             failures.append("invalid proxy PUT partially changed the list")
+        all_off = client.put(
+            "/api/proxies",
+            json={
+                "items": [
+                    {"value": "one.example:8001", "selected": False},
+                    {"value": "two.example:8002", "selected": False},
+                ],
+            },
+        )
+        if all_off.status_code != 400:
+            failures.append("all-off proxy PUT did not return HTTP 400")
+        if repositories["proxy_repo"].list_all() != before:
+            failures.append("all-off proxy PUT changed the list")
         empty_enabled = client.put(
             "/api/proxies",
-            json={"enabled": True, "items": []},
+            json={"items": []},
         )
         if empty_enabled.status_code != 400:
             failures.append("enabled empty proxy list did not return HTTP 400")

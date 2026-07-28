@@ -6,17 +6,20 @@ import { Clipboard, Download, Eraser, Play, RotateCcw, Search, Square, Terminal,
 import StatStrip from '../components/StatStrip.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import UiPanel from '../components/UiPanel.vue'
+import ProxyPicker from '../components/ProxyPicker.vue'
 import { confirmAction } from '../composables/useConfirm'
 import { showToast } from '../composables/useToast'
 import { apiJson, apiText, postJson, presentApiError } from '../services/api'
+import { normalizeProxyItems, persistProxyItems, selectProxyItem } from '../services/proxies'
 import { subscribeSse } from '../services/sse'
-import type { CheckRecord, Limits, ProxySettings, StreamEvent } from '../types'
+import type { CheckRecord, Limits, ProxyItem, ProxySettings, StreamEvent } from '../types'
 
 const { t } = useI18n()
 const input = ref('')
 const checks = ref<CheckRecord[]>([])
 const concurrency = ref(5)
-const proxyEnabled = ref(false)
+const proxyItems = ref<ProxyItem[]>([])
+const proxySaving = ref(false)
 const concurrencyOptions = ref([1, 2, 5, 10, 20, 50, 100, 200])
 const search = ref('')
 const statusFilter = ref('all')
@@ -32,6 +35,7 @@ let pollTimer: number | undefined
 let unsubscribe = () => {}
 
 const lineCount = computed(() => lines(input.value).length)
+const proxyReady = computed(() => proxyItems.value.some((item) => item.selected))
 const runningCount = computed(() => checks.value.filter((row) => row.status === 'running' || row.status === 'queued').length)
 const liveCount = computed(() => checks.value.filter((row) => row.status === 'live').length)
 const invalidCount = computed(() => checks.value.filter((row) => ['die', 'error', 'onboarding', 'cancelled'].includes(row.status)).length)
@@ -87,12 +91,26 @@ async function refreshAccountOutputs() {
   freeOutput.value = free.trimEnd()
   plusOutput.value = plus.trimEnd()
 }
+async function toggleProxy(index: number, selected: boolean) {
+  const previous = proxyItems.value.map((item) => ({ ...item }))
+  const next = selectProxyItem(previous, index, selected)
+  if (!next) return showToast(t('settings.proxyRequired'), 'danger')
+  proxyItems.value = next
+  proxySaving.value = true
+  try {
+    const result = await persistProxyItems(next)
+    proxyItems.value = normalizeProxyItems(result.items)
+  } catch (error) {
+    proxyItems.value = previous
+    showToast(message(error), 'danger')
+  } finally { proxySaving.value = false }
+}
 async function startChecks() {
-  if (!lineCount.value) return showToast(t('common.noData'), 'danger')
+  if (!lineCount.value || !proxyReady.value) return showToast(t(!lineCount.value ? 'common.noData' : 'settings.proxyRequired'), 'danger')
   loading.value = true
   try {
     const result = await postJson<{ check_ids: string[] }>('/api/checks/start', {
-      input: lines(input.value).join('\n'), concurrency: concurrency.value, proxy_enabled: proxyEnabled.value,
+      input: lines(input.value).join('\n'), concurrency: concurrency.value,
     })
     showToast(t('toast.started', { count: result.check_ids.length }), result.check_ids.length ? 'success' : 'default')
     scheduleRefresh()
@@ -106,7 +124,7 @@ async function stopChecks() {
 async function retryChecks() {
   try {
     const result = await postJson<{ check_ids: string[] }>('/api/checks/retry', {
-      concurrency: concurrency.value, proxy_enabled: proxyEnabled.value,
+      concurrency: concurrency.value,
     })
     showToast(t('toast.retrying', { count: result.check_ids.length }), result.check_ids.length ? 'success' : 'default')
     scheduleRefresh()
@@ -168,7 +186,7 @@ onMounted(async () => {
     const [values, proxies] = await Promise.all([
       apiJson<Limits>('/api/limits'), apiJson<ProxySettings>('/api/proxies'),
     ])
-    proxyEnabled.value = proxies.enabled
+    proxyItems.value = normalizeProxyItems(proxies.items)
     concurrencyOptions.value = values.check_concurrency_choices.filter((value) => value <= values.max_check)
     if (!concurrencyOptions.value.includes(concurrency.value)) concurrency.value = concurrencyOptions.value[0] || 1
   } catch (error) { showToast(message(error), 'danger') }
@@ -186,12 +204,18 @@ onBeforeUnmount(() => { unsubscribe(); window.clearInterval(pollTimer); window.c
         <template #actions><span class="count-chip">{{ t('checks.lineCount', { count: lineCount }) }}</span></template>
         <div class="form-stack">
           <textarea v-model="input" class="mono-input check-input" spellcheck="false" placeholder="mail|pass|2fa&#10;mail|pass|2fa|email|mailpass|refresh|client_id" />
+          <ProxyPicker
+            :items="proxyItems"
+            test-id-prefix="checks-proxy-selected"
+            compact
+            :disabled="proxySaving || runningCount > 0"
+            @toggle="toggleProxy"
+          />
           <div class="options-row">
-            <label class="switch-control"><input v-model="proxyEnabled" data-testid="checks-proxy-enabled" type="checkbox"><span /><b>{{ t('settings.useProxy') }}</b></label>
             <label class="select-field"><span>{{ t('checks.concurrency') }}</span><select v-model.number="concurrency"><option v-for="value in concurrencyOptions" :key="value" :value="value">{{ value }}</option></select></label>
           </div>
           <div class="action-row">
-            <button class="btn primary" data-testid="checks-run" type="button" :disabled="loading || runningCount > 0" @click="startChecks"><Play :size="16" />{{ t('checks.run') }}</button>
+            <button class="btn primary" data-testid="checks-run" type="button" :disabled="loading || proxySaving || !proxyReady || runningCount > 0" @click="startChecks"><Play :size="16" />{{ t('checks.run') }}</button>
             <button class="btn danger ghost-danger" type="button" :disabled="!runningCount" @click="stopChecks"><Square :size="15" />{{ t('checks.stop') }}</button>
             <button class="icon-btn" type="button" :title="t('registration.clearInput')" @click="input = ''"><Eraser :size="17" /></button>
           </div>
@@ -200,7 +224,7 @@ onBeforeUnmount(() => { unsubscribe(); window.clearInterval(pollTimer); window.c
 
       <UiPanel :title="t('checks.results')" class="check-results-panel">
         <template #actions>
-          <button class="icon-btn" type="button" :title="t('checks.retry')" @click="retryChecks"><RotateCcw :size="16" /></button>
+          <button class="icon-btn" type="button" :title="t('checks.retry')" :disabled="proxySaving || !proxyReady" @click="retryChecks"><RotateCcw :size="16" /></button>
           <button class="icon-btn" type="button" :title="t('checks.export')" @click="exportLive"><Download :size="16" /></button>
           <button class="icon-btn" type="button" :title="t('checks.clearDone')" @click="clearResults"><Trash2 :size="16" /></button>
         </template>

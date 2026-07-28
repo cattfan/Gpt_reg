@@ -74,19 +74,10 @@ def _no_store(payload: Any, *, status_code: int = 200) -> JSONResponse:
     )
 
 
-def _setting_enabled(key: str) -> bool:
-    return str(settings_repo.get(key) or "false").lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
-def _runtime_proxy_pool(enabled: bool | None = None) -> ProxyPool:
+def _runtime_proxy_pool() -> ProxyPool:
     return ProxyPool.from_records(
         proxy_repo.list_all(),
-        enabled=_setting_enabled("proxy.enabled") if enabled is None else enabled,
+        enabled=True,
     )
 
 
@@ -135,6 +126,16 @@ def get_settings() -> dict[str, str | None]:
     return settings_repo.all_known()
 
 
+@app.get("/api/settings/integration-keys")
+def get_integration_keys() -> JSONResponse:
+    return _no_store(
+        {
+            "sms.smsbower.api_key": settings_repo.get("sms.smsbower.api_key"),
+            "accstack.api_key": settings_repo.get("accstack.api_key"),
+        }
+    )
+
+
 @app.post("/api/settings")
 async def post_settings(payload: dict[str, str]) -> dict[str, str]:
     from gpt_reg.db.repositories import MASKED_VALUE
@@ -151,7 +152,7 @@ MAIL_RENTAL_SOURCES = ("gmail_smsbower", "gmail_accstack")
 
 
 @app.get("/api/mail-sources/status")
-def mail_source_status(source: str, proxy_enabled: bool | None = None) -> JSONResponse:
+def mail_source_status(source: str) -> JSONResponse:
     if source not in MAIL_RENTAL_SOURCES:
         raise HTTPException(status_code=400, detail="unsupported mail source")
     key_name = (
@@ -171,7 +172,7 @@ def mail_source_status(source: str, proxy_enabled: bool | None = None) -> JSONRe
             }
         )
     try:
-        proxy_url = _runtime_proxy_pool(proxy_enabled).acquire_url()
+        proxy_url = _runtime_proxy_pool().acquire_url()
         status = _provider_for_source(source, proxy_url=proxy_url).status()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -185,7 +186,7 @@ def get_proxies() -> JSONResponse:
     items = proxy_repo.list_all()
     return _no_store(
         {
-            "enabled": _setting_enabled("proxy.enabled"),
+            "enabled": True,
             "items": items,
             "selected": sum(1 for item in items if item["selected"]),
             "total": len(items),
@@ -195,10 +196,7 @@ def get_proxies() -> JSONResponse:
 
 @app.put("/api/proxies")
 async def put_proxies(payload: dict[str, Any]) -> JSONResponse:
-    enabled = payload.get("enabled")
     items = payload.get("items")
-    if type(enabled) is not bool:
-        raise HTTPException(status_code=400, detail="enabled must be a boolean")
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="items must be a list")
     normalized: list[dict[str, Any]] = []
@@ -229,9 +227,9 @@ async def put_proxies(payload: dict[str, Any]) -> JSONResponse:
             ) from exc
         normalized.append({"value": value.strip(), "selected": selected})
     try:
-        ProxyPool.from_records(normalized, enabled=enabled)
+        ProxyPool.from_records(normalized, enabled=True)
         proxy_repo.replace_all(normalized)
-        settings_repo.set("proxy.enabled", "true" if enabled else "false")
+        settings_repo.set("proxy.enabled", "true")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return get_proxies()
@@ -403,13 +401,8 @@ async def start_jobs(payload: dict[str, Any]) -> dict[str, Any]:
     profile_region = _clean_profile_region(payload.get("profile_region"))
     settings_repo.set("reg.source", source)
     concurrency = clamp_concurrency(payload.get("concurrency"), reg_mode, fallback_enabled)
-    proxy_enabled = _json_bool(
-        payload,
-        "proxy_enabled",
-        default=_setting_enabled("proxy.enabled"),
-    )
     try:
-        pool = _runtime_proxy_pool(proxy_enabled)
+        pool = _runtime_proxy_pool()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if source == "outlook":
@@ -527,11 +520,6 @@ async def retry_jobs(payload: dict[str, Any]) -> dict[str, Any]:
     fallback_enabled = _json_bool(payload, "fallback_enabled")
     headless = _json_bool(payload, "headless")
     with_2fa = _json_bool(payload, "with_2fa")
-    proxy_enabled = _json_bool(
-        payload,
-        "proxy_enabled",
-        default=_setting_enabled("proxy.enabled"),
-    )
     concurrency = clamp_concurrency(
         payload.get("concurrency"), retry_mode, fallback_enabled
     )
@@ -551,7 +539,7 @@ async def retry_jobs(payload: dict[str, Any]) -> dict[str, Any]:
             detail="retry Hotmail/Outlook and Gmail in separate batches",
         )
     try:
-        pool = _runtime_proxy_pool(proxy_enabled)
+        pool = _runtime_proxy_pool()
         if gmail_targets:
             def provider_factory(source: str):
                 return _provider_for_source(source, proxy_url=pool.acquire_url())
@@ -658,18 +646,13 @@ async def start_checks(payload: dict[str, Any]) -> dict[str, Any]:
     concurrency = clamp_check_concurrency(payload.get("concurrency"))
     try:
         records = proxy_repo.list_all()
-        proxy_enabled = _json_bool(
-            payload,
-            "proxy_enabled",
-            default=_setting_enabled("proxy.enabled"),
-        )
-        ProxyPool.from_records(records, enabled=proxy_enabled)
+        ProxyPool.from_records(records, enabled=True)
         ids = check_manager.start_batch(
             combos=combos,
             checks_repo=checks_repo,
             proxy_pool_text="",
             proxy_records=records,
-            proxy_enabled=proxy_enabled,
+            proxy_enabled=True,
             concurrency=concurrency,
         )
     except ValueError as exc:
@@ -701,19 +684,14 @@ async def retry_checks(payload: dict[str, Any]) -> dict[str, Any]:
     if not targets:
         return {"check_ids": []}
     records = proxy_repo.list_all()
-    proxy_enabled = _json_bool(
-        payload,
-        "proxy_enabled",
-        default=_setting_enabled("proxy.enabled"),
-    )
     try:
-        ProxyPool.from_records(records, enabled=proxy_enabled)
+        ProxyPool.from_records(records, enabled=True)
         ids = check_manager.start_batch(
             combos=[],
             checks_repo=checks_repo,
             proxy_pool_text="",
             proxy_records=records,
-            proxy_enabled=proxy_enabled,
+            proxy_enabled=True,
             concurrency=clamp_check_concurrency(payload.get("concurrency")),
             check_ids=[str(r["id"]) for r in targets],
         )

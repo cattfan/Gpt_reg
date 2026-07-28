@@ -62,8 +62,7 @@ class ProxyPool:
             parsed.append((normalized, selected))
 
         selected_values = [value for value, selected in parsed if selected]
-        candidates = selected_values or [value for value, _selected in parsed]
-        return cls(candidates, enabled=enabled)
+        return cls(selected_values, enabled=enabled)
 
     def acquire(self) -> dict[str, str] | None:
         if not self._raw:

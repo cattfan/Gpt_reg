@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { CheckCircle2, CircleOff, Eye, EyeOff, KeyRound, RefreshCw, Save } from '@lucide/vue'
+import { CheckCircle2, CircleOff, Eye, EyeOff, KeyRound, RefreshCw, Save, Shuffle } from '@lucide/vue'
 
 import UiPanel from '../components/UiPanel.vue'
 import { showToast } from '../composables/useToast'
@@ -13,12 +13,11 @@ type IntegrationId = 'smsbower' | 'accstack'
 const { t } = useI18n()
 const integrationKeys = ref<Record<IntegrationId, string>>({ smsbower: '', accstack: '' })
 const hasIntegrationKey = ref<Record<IntegrationId, boolean>>({ smsbower: false, accstack: false })
-const showIntegrationKey = ref<Record<IntegrationId, boolean>>({ smsbower: false, accstack: false })
+const showIntegrationKey = ref<Record<IntegrationId, boolean>>({ smsbower: true, accstack: true })
 const integrationStatus = ref<Record<IntegrationId, MailSourceStatus | null>>({ smsbower: null, accstack: null })
 const integrationError = ref<Record<IntegrationId, string>>({ smsbower: '', accstack: '' })
 const loadingStatus = ref<Record<IntegrationId, boolean>>({ smsbower: false, accstack: false })
 const savingKey = ref<Record<IntegrationId, boolean>>({ smsbower: false, accstack: false })
-const proxyEnabled = ref(false)
 const proxyText = ref('')
 const proxyItems = ref<ProxyItem[]>([])
 const proxyLineError = ref<{ line?: number; message: string } | null>(null)
@@ -40,7 +39,6 @@ function formatMoney(amount: number | undefined, currency = 'USD', divisor = 100
 function updateIntegrationKey(id: IntegrationId, event: Event) {
   const value = (event.target as HTMLInputElement).value
   integrationKeys.value[id] = value
-  if (!value.trim()) showIntegrationKey.value[id] = false
 }
 function updateProxyText(value: string) {
   const previous = new Map(proxyItems.value.map((item) => [item.value, item.selected]))
@@ -48,17 +46,20 @@ function updateProxyText(value: string) {
   proxyItems.value = value.split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => ({ value: line, selected: previous.get(line) ?? false }))
+    .map((line) => ({ value: line, selected: previous.get(line) ?? true }))
   proxyLineError.value = null
 }
 async function loadSettings() {
   try {
-    const [values, proxies] = await Promise.all([
-      apiJson<Record<string, string | null>>('/api/settings'),
+    const [keys, proxies] = await Promise.all([
+      apiJson<Record<string, string | null>>('/api/settings/integration-keys'),
       apiJson<ProxySettings>('/api/proxies'),
     ])
-    integrations.forEach(({ id, setting }) => { hasIntegrationKey.value[id] = Boolean(values[setting]) })
-    proxyEnabled.value = proxies.enabled
+    integrations.forEach(({ id, setting }) => {
+      integrationKeys.value[id] = keys[setting] || ''
+      hasIntegrationKey.value[id] = Boolean(keys[setting])
+      showIntegrationKey.value[id] = true
+    })
     proxyItems.value = (proxies.items || []).map((item) => ({ ...item }))
     proxyText.value = proxyItems.value.map((item) => item.value).join('\n')
   } catch (error) { showToast(message(error), 'danger') }
@@ -86,8 +87,6 @@ async function saveIntegration(id: IntegrationId) {
   try {
     await postJson('/api/settings', { [definition.setting]: key })
     hasIntegrationKey.value[id] = true
-    integrationKeys.value[id] = ''
-    showIntegrationKey.value[id] = false
     showToast(t('toast.saved'), 'success')
     await refreshIntegration(id, false)
   } catch (error) { showToast(message(error), 'danger') }
@@ -98,10 +97,8 @@ async function saveProxy() {
   proxyLineError.value = null
   try {
     const result = await putJson<ProxySettings>('/api/proxies', {
-      enabled: proxyEnabled.value,
       items: proxyItems.value.map(({ value, selected }) => ({ value, selected })),
     })
-    proxyEnabled.value = result.enabled
     proxyItems.value = (result.items || []).map((item) => ({ ...item }))
     proxyText.value = proxyItems.value.map((item) => item.value).join('\n')
     showToast(t('toast.saved'), 'success')
@@ -119,6 +116,9 @@ async function saveProxy() {
 onMounted(async () => {
   await loadSettings()
   await Promise.all(integrations.map(({ id }) => refreshIntegration(id, false)))
+})
+onBeforeUnmount(() => {
+  integrationKeys.value = { smsbower: '', accstack: '' }
 })
 </script>
 
@@ -154,7 +154,7 @@ onMounted(async () => {
               <label class="field">
                 <span><KeyRound :size="14" />{{ t('settings.apiKey') }}</span>
                 <span class="password-field">
-                  <input :value="integrationKeys[integration.id]" :data-testid="`${integration.id}-api-key`" :type="showIntegrationKey[integration.id] ? 'text' : 'password'" autocomplete="new-password" :placeholder="hasIntegrationKey[integration.id] ? '••••••••••••' : `${t(`settings.${integration.id}`)} API key`" @input="updateIntegrationKey(integration.id, $event)">
+                  <input :value="integrationKeys[integration.id]" :data-testid="`${integration.id}-api-key`" :type="showIntegrationKey[integration.id] ? 'text' : 'password'" autocomplete="off" spellcheck="false" :placeholder="`${t(`settings.${integration.id}`)} API key`" @input="updateIntegrationKey(integration.id, $event)">
                   <button :data-testid="`${integration.id}-api-key-toggle`" type="button" :title="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" :aria-label="t(showIntegrationKey[integration.id] ? 'common.hide' : 'common.show')" :disabled="!integrationKeys[integration.id].trim()" @click="showIntegrationKey[integration.id] = !showIntegrationKey[integration.id]"><EyeOff v-if="showIntegrationKey[integration.id]" :size="16" /><Eye v-else :size="16" /></button>
                 </span>
               </label>
@@ -167,8 +167,8 @@ onMounted(async () => {
 
       <UiPanel id="settings-proxy" :title="t('settings.proxy')" :subtitle="t('settings.proxyHint')" class="proxy-settings-panel">
           <div class="proxy-toolbar">
-            <label class="switch-control"><input v-model="proxyEnabled" data-testid="proxy-enabled" type="checkbox"><span /><b>{{ t('settings.useProxy') }}</b></label>
-            <span class="proxy-mode" :class="{ active: proxyEnabled }">{{ t(proxyEnabled ? (selectedProxyCount ? 'settings.selectedRandom' : 'settings.proxyAllUsed') : 'settings.directMode') }}</span>
+            <span class="proxy-always-on"><Shuffle :size="16" /><b>{{ t('settings.proxyAlwaysOn') }}</b></span>
+            <span class="proxy-mode active">{{ t('settings.selectedRandom') }}</span>
           </div>
           <div class="proxy-editor-grid">
             <label class="field proxy-editor-field">
@@ -179,8 +179,8 @@ onMounted(async () => {
               <header><span>{{ t('settings.proxyCount', { selected: selectedProxyCount, total: proxyItems.length }) }}</span></header>
               <div v-if="proxyItems.length" class="proxy-list">
                 <label v-for="(proxy, index) in proxyItems" :key="`${proxy.value}-${index}`" class="proxy-row" :class="{ invalid: proxyLineError?.line === index + 1 }">
-                  <input v-model="proxy.selected" :data-testid="`proxy-selected-${index}`" type="checkbox">
-                  <span class="proxy-check" aria-hidden="true"><CheckCircle2 :size="14" /></span>
+                  <input v-model="proxy.selected" :data-testid="`proxy-selected-${index}`" type="checkbox" :disabled="proxy.selected && selectedProxyCount === 1">
+                  <span class="proxy-switch" aria-hidden="true" />
                   <code>{{ proxy.value }}</code>
                   <small>{{ index + 1 }}</small>
                 </label>
@@ -193,7 +193,7 @@ onMounted(async () => {
           </p>
           <div class="settings-action-bar">
             <span>{{ t('settings.proxyCount', { selected: selectedProxyCount, total: proxyItems.length }) }}</span>
-            <button class="btn primary" data-testid="proxy-save" type="button" :disabled="savingProxy" @click="saveProxy"><Save :size="16" />{{ t('settings.saveProxies') }}</button>
+            <button class="btn primary" data-testid="proxy-save" type="button" :disabled="savingProxy || selectedProxyCount === 0" @click="saveProxy"><Save :size="16" />{{ t('settings.saveProxies') }}</button>
           </div>
       </UiPanel>
     </div>

@@ -8,12 +8,14 @@ import {
 import StatStrip from '../components/StatStrip.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import UiPanel from '../components/UiPanel.vue'
+import ProxyPicker from '../components/ProxyPicker.vue'
 import { confirmAction } from '../composables/useConfirm'
 import { showToast } from '../composables/useToast'
 import { apiJson, apiText, postJson, presentApiError } from '../services/api'
+import { normalizeProxyItems, persistProxyItems, selectProxyItem } from '../services/proxies'
 import { subscribeSse } from '../services/sse'
 import type {
-  Job, Limits, MailProduct, MailSourceStatus, ProfileRegion, ProxySettings, RegistrationSource, StreamEvent,
+  Job, Limits, MailProduct, MailSourceStatus, ProfileRegion, ProxyItem, ProxySettings, RegistrationSource, StreamEvent,
 } from '../types'
 
 const { t } = useI18n()
@@ -28,7 +30,8 @@ const sourceError = ref('')
 const sourceLoading = ref(false)
 const regMode = ref<'browser' | 'http'>('browser')
 const fallbackEnabled = ref(false)
-const proxyEnabled = ref(false)
+const proxyItems = ref<ProxyItem[]>([])
+const proxySaving = ref(false)
 const headless = ref(false)
 const with2fa = ref(true)
 const concurrency = ref(1)
@@ -52,13 +55,14 @@ const errorJobs = computed(() => jobs.value.filter((job) => job.status === 'erro
 const errorOutput = computed(() => errorJobs.value.map((job) => `${job.email}|${job.error || job.status}`).join('\n'))
 const selectedJob = computed(() => jobs.value.find((job) => job.id === selectedJobId.value))
 const selectedProduct = computed<MailProduct | null>(() => mailStatus.value?.products.find((product) => product.id === productId.value) || null)
+const proxyReady = computed(() => proxyItems.value.some((item) => item.selected))
 const sourceStock = computed(() => selectedProduct.value?.stock ?? mailStatus.value?.stock ?? 0)
 const sourcePrice = computed(() => selectedProduct.value?.price ?? mailStatus.value?.price ?? 0)
 const sourceAffordable = computed(() => sourcePrice.value > 0 && mailStatus.value
   ? Math.min(sourceStock.value, Math.floor(mailStatus.value.balance / sourcePrice.value))
   : mailStatus.value?.affordable ?? 0)
 const canStart = computed(() => {
-  if (loading.value || batchRunning.value || activeCount.value > 0) return false
+  if (loading.value || proxySaving.value || !proxyReady.value || batchRunning.value || activeCount.value > 0) return false
   if (!isGmail.value) return comboCount.value > 0
   return Boolean(mailStatus.value?.configured)
     && Number.isInteger(rentalCount.value)
@@ -118,11 +122,20 @@ async function selectSource(next: RegistrationSource) {
   productId.value = ''
   if (next !== 'outlook') await refreshMailStatus()
 }
-function updateProxyEnabled(event: Event) {
-  proxyEnabled.value = (event.target as HTMLInputElement).checked
-  if (source.value === 'outlook') return
-  mailStatus.value = null
-  void refreshMailStatus()
+async function toggleProxy(index: number, selected: boolean) {
+  const previous = proxyItems.value.map((item) => ({ ...item }))
+  const next = selectProxyItem(previous, index, selected)
+  if (!next) return showToast(t('settings.proxyRequired'), 'danger')
+  proxyItems.value = next
+  proxySaving.value = true
+  try {
+    const result = await persistProxyItems(next)
+    proxyItems.value = normalizeProxyItems(result.items)
+    if (source.value !== 'outlook') await refreshMailStatus()
+  } catch (error) {
+    proxyItems.value = previous
+    showToast(message(error), 'danger')
+  } finally { proxySaving.value = false }
 }
 async function refreshMailStatus() {
   if (source.value === 'outlook') return
@@ -131,7 +144,7 @@ async function refreshMailStatus() {
   sourceLoading.value = true
   sourceError.value = ''
   try {
-    const query = new URLSearchParams({ source: requestedSource, proxy_enabled: String(proxyEnabled.value) })
+    const query = new URLSearchParams({ source: requestedSource })
     const status = await apiJson<MailSourceStatus>(`/api/mail-sources/status?${query}`)
     if (request !== sourceRequest || source.value !== requestedSource) return
     mailStatus.value = { ...status, products: status.products || [] }
@@ -156,7 +169,6 @@ async function startBatch() {
       profile_region: profileRegion.value,
       reg_mode: regMode.value,
       fallback_enabled: fallbackEnabled.value,
-      proxy_enabled: proxyEnabled.value,
       headless: headless.value,
       with_2fa: with2fa.value,
       concurrency: concurrency.value,
@@ -185,10 +197,12 @@ async function stop(jobId?: string) {
 async function retryFailed() { await retryJobs() }
 async function retryJob(jobId: string) { await retryJobs([jobId]) }
 async function retryJobs(jobIds?: string[]) {
+  if (proxySaving.value) return
+  if (!proxyReady.value) return showToast(t('settings.proxyRequired'), 'danger')
   try {
     const result = await postJson<{ job_ids: string[] }>('/api/jobs/retry', {
       headless: headless.value, with_2fa: with2fa.value, reg_mode: regMode.value,
-      fallback_enabled: fallbackEnabled.value, proxy_enabled: proxyEnabled.value, concurrency: concurrency.value,
+      fallback_enabled: fallbackEnabled.value, concurrency: concurrency.value,
       ...(jobIds ? { job_ids: jobIds } : {}),
     })
     showToast(t('toast.retrying', { count: result.job_ids.length }), result.job_ids.length ? 'success' : 'default')
@@ -258,7 +272,7 @@ onMounted(async () => {
       apiJson<ProxySettings>('/api/proxies'),
     ])
     limits.value = loadedLimits
-    proxyEnabled.value = proxies.enabled
+    proxyItems.value = normalizeProxyItems(proxies.items)
     const savedSource = settings['reg.source'] as RegistrationSource
     source.value = ['outlook', 'gmail_smsbower', 'gmail_accstack'].includes(savedSource) ? savedSource : 'outlook'
     if (!concurrencyOptions.value.includes(concurrency.value)) concurrency.value = concurrencyOptions.value[0] || 1
@@ -336,9 +350,15 @@ onBeforeUnmount(() => {
             <label class="switch-control"><input v-model="headless" type="checkbox" :disabled="regMode === 'http'"><span /><b>{{ t('registration.headless') }}</b></label>
             <label class="switch-control"><input v-model="with2fa" type="checkbox"><span /><b>{{ t('registration.twofa') }}</b></label>
             <label class="switch-control"><input v-model="fallbackEnabled" data-testid="engine-fallback" type="checkbox"><span /><b>{{ t('registration.engineFallback') }}</b></label>
-            <label class="switch-control"><input :checked="proxyEnabled" data-testid="registration-proxy-enabled" type="checkbox" @change="updateProxyEnabled"><span /><b>{{ t('settings.useProxy') }}</b></label>
             <label class="select-field"><span>{{ t('registration.concurrency') }}</span><select v-model.number="concurrency"><option v-for="value in concurrencyOptions" :key="value" :value="value">{{ value }}</option></select></label>
           </div>
+          <ProxyPicker
+            :items="proxyItems"
+            test-id-prefix="registration-proxy-selected"
+            compact
+            :disabled="proxySaving || activeCount > 0 || batchRunning"
+            @toggle="toggleProxy"
+          />
           <div class="action-row">
             <button class="btn primary" data-testid="registration-run" type="button" :disabled="!canStart" @click="startBatch"><Play :size="16" />{{ isGmail ? t('registration.rentAndRun', { count: rentalCount }) : t('registration.run') }}</button>
             <button class="btn danger ghost-danger" type="button" :disabled="!activeCount && !batchRunning" @click="stop()"><Square :size="15" />{{ t('registration.stopAll') }}</button>
@@ -349,7 +369,7 @@ onBeforeUnmount(() => {
 
       <UiPanel :title="t('registration.jobs')" class="jobs-panel">
         <template #actions>
-          <button class="icon-btn" type="button" :title="t('registration.retryFailed')" :aria-label="t('registration.retryFailed')" @click="retryFailed"><RotateCcw :size="16" /></button>
+          <button class="icon-btn" type="button" :title="t('registration.retryFailed')" :aria-label="t('registration.retryFailed')" :disabled="proxySaving || !proxyReady" @click="retryFailed"><RotateCcw :size="16" /></button>
           <button class="icon-btn" type="button" :title="t('registration.clearDone')" :aria-label="t('registration.clearDone')" @click="clearJobs('done')"><Trash2 :size="16" /></button>
           <button class="icon-btn" type="button" :title="t('registration.clearAll')" :aria-label="t('registration.clearAll')" @click="clearJobs('all')"><ListX :size="16" /></button>
         </template>
@@ -361,7 +381,7 @@ onBeforeUnmount(() => {
             </button>
             <div class="job-actions">
               <button v-if="job.status === 'running' || job.status === 'queued'" class="icon-btn row-action" type="button" :title="t('common.stop')" :aria-label="`${t('common.stop')} ${job.email}`" @click="stop(job.id)"><Square :size="14" /></button>
-              <button v-if="job.status === 'error' || job.status === 'cancelled'" :data-testid="`job-retry-${job.id}`" class="icon-btn row-action retry-action" type="button" :title="t('registration.retryOne')" :aria-label="`${t('registration.retryOne')} ${job.email}`" @click="retryJob(job.id)"><RotateCcw :size="14" /></button>
+              <button v-if="job.status === 'error' || job.status === 'cancelled'" :data-testid="`job-retry-${job.id}`" class="icon-btn row-action retry-action" type="button" :title="t('registration.retryOne')" :aria-label="`${t('registration.retryOne')} ${job.email}`" :disabled="proxySaving || !proxyReady" @click="retryJob(job.id)"><RotateCcw :size="14" /></button>
               <button v-if="['success', 'error', 'cancelled'].includes(job.status)" :data-testid="`job-delete-${job.id}`" class="icon-btn row-action delete-action" type="button" :title="t('registration.deleteOne')" :aria-label="`${t('registration.deleteOne')} ${job.email}`" @click="deleteJob(job)"><Trash2 :size="14" /></button>
             </div>
           </div>

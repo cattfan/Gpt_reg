@@ -27,10 +27,15 @@ describe('api client', () => {
   })
 
   it('maps known Vietnamese API errors to the active interface locale', () => {
-    const labels: Record<string, string> = { 'errors.invalidCombo': 'Invalid combo', 'toast.requestFailed': 'Request failed' }
+    const labels: Record<string, string> = {
+      'errors.invalidCombo': 'Invalid combo',
+      'settings.proxyRequired': 'At least one proxy must be enabled.',
+      'toast.requestFailed': 'Request failed',
+    }
     const translate = (key: string) => labels[key] || key
 
     expect(presentApiError(new Error('Combo sai — dòng 2'), translate)).toBe('Invalid combo — dòng 2')
+    expect(presentApiError(new Error('proxy is enabled but no proxies are configured'), translate)).toBe('At least one proxy must be enabled.')
   })
 
   it('preserves structured line errors and supports JSON PUT requests', async () => {

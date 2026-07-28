@@ -60,13 +60,14 @@ def main() -> int:
         if populations[-1] != ("two.example:8002", "three.example:8003"):
             failures.append(f"wrong selected candidates: {populations[-1]!r}")
 
-        none_selected = pool_module.ProxyPool.from_records(
-            [{**row, "selected": False} for row in records],
-            enabled=True,
-        )
-        none_selected.acquire_url()
-        if populations[-1] != tuple(row["value"] for row in records):
-            failures.append(f"none-selected must mean all: {populations[-1]!r}")
+        try:
+            pool_module.ProxyPool.from_records(
+                [{**row, "selected": False} for row in records],
+                enabled=True,
+            )
+            failures.append("none-selected active pool must fail fast")
+        except ValueError:
+            pass
     finally:
         pool_module.secrets.choice = original_choice
 

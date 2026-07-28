@@ -56,6 +56,7 @@ export function presentApiError(error: unknown, translate: (key: string) => stri
   if (detail === 'Chưa có combo nào.') return translate('errors.noCombos')
   if (detail.startsWith('Nguồn Gmail chưa hỗ trợ')) return translate('errors.gmailUnavailable')
   if (detail === 'job not found') return translate('errors.jobNotFound')
+  if (detail === 'proxy is enabled but no proxies are configured') return translate('settings.proxyRequired')
   if (detail.startsWith('Combo sai')) {
     const technical = detail.includes('—') ? detail.slice(detail.indexOf('—')) : ''
     return `${translate('errors.invalidCombo')}${technical ? ` ${technical}` : ''}`
