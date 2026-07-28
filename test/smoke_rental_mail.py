@@ -106,6 +106,7 @@ def main() -> int:
             source=source,
             product_id=str(product_id),
             alias_limit=1,
+            aliases_enabled=False,
             profile_region="vi",
             reg_mode=args.mode,
             execute=lambda row, mailbox: manager._run_one(

@@ -47,6 +47,7 @@ settings = load_settings()
 conn = connect(settings.runtime_dir / "data.db")
 migrate(conn)
 settings_repo = SettingsRepository(conn)
+settings_repo.apply_defaults({"mail.gmail.alias_enabled": "false"})
 jobs_repo = JobRepository(conn)
 checks_repo = ChecksRepository(conn)
 rentals_repo = MailRentalRepository(conn)
@@ -335,6 +336,16 @@ def _alias_limit(source: str) -> int:
     return value
 
 
+def _aliases_enabled() -> bool:
+    key = "mail.gmail.alias_enabled"
+    raw = str(settings_repo.get(key, "false") or "false").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise HTTPException(status_code=500, detail=f"invalid setting: {key}")
+
+
 def _job_for_api(row: dict[str, Any]) -> dict[str, Any]:
     """Chỉ trả field UI cần; combo/password/session_path không rời server."""
     public_fields = (
@@ -468,6 +479,7 @@ async def start_jobs(payload: dict[str, Any]) -> dict[str, Any]:
             source=source,
             product_id=product_id,
             alias_limit=_alias_limit(source),
+            aliases_enabled=_aliases_enabled(),
             profile_region=profile_region,
             headless=headless,
             with_2fa=with_2fa,

@@ -1,4 +1,4 @@
-"""Coordinate one paid mailbox across deterministic Gmail aliases."""
+"""Coordinate one paid Gmail rental with optional deterministic aliases."""
 
 from __future__ import annotations
 
@@ -84,6 +84,7 @@ class RentalCoordinator:
         source: str,
         product_id: str | None,
         alias_limit: int,
+        aliases_enabled: bool,
         profile_region: str,
         reg_mode: str,
         execute: Callable[[dict[str, Any], RentalMailboxProvider], SignupResult],
@@ -94,6 +95,9 @@ class RentalCoordinator:
             raise ValueError(f"unsupported rental source: {source!r}")
         if not isinstance(alias_limit, int) or alias_limit < 1:
             raise ValueError("alias_limit must be a positive integer")
+        if type(aliases_enabled) is not bool:
+            raise ValueError("aliases_enabled must be a boolean")
+        attempt_limit = alias_limit if aliases_enabled else 1
 
         created_at = time.time()
         try:
@@ -133,7 +137,7 @@ class RentalCoordinator:
         )
 
         job_ids: list[str] = []
-        for alias_index in range(1, alias_limit + 1):
+        for alias_index in range(1, attempt_limit + 1):
             if should_cancel():
                 provider.close(rental, success=False)
                 rentals_repo.update(
@@ -154,7 +158,11 @@ class RentalCoordinator:
                 return job_ids
 
             job_id = uuid.uuid4().hex
-            email = gmail_alias(rental.base_email, seed=rental_id, index=alias_index)
+            email = (
+                gmail_alias(rental.base_email, seed=rental_id, index=alias_index)
+                if aliases_enabled
+                else rental.base_email
+            )
             profile = generate_profile_identity(profile_region, seed=job_id)
             fingerprint_seed = new_seed()
             row = {
@@ -172,7 +180,7 @@ class RentalCoordinator:
                 "fingerprint_data": None,
                 "rental_id": rental_id,
                 "source_email": rental.base_email,
-                "alias_index": alias_index,
+                "alias_index": alias_index if aliases_enabled else None,
                 "profile_region": profile.region,
                 "profile_name": profile.name,
                 "birthdate": profile.birthdate,
@@ -254,7 +262,7 @@ class RentalCoordinator:
                     error=result.error or "registration failed",
                 )
                 return job_ids
-            if alias_index >= alias_limit:
+            if alias_index >= attempt_limit:
                 provider.close(rental, success=True)
                 rentals_repo.update(
                     rental_id,

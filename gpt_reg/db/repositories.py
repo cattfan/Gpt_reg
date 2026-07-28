@@ -26,6 +26,7 @@ _EXACT_KEYS: frozenset[str] = frozenset(
         "reg.password",
         "reg.source",
         "mail_mode.provider",
+        "mail.gmail.alias_enabled",
         "browser.geoip",
         "ui.theme",
         "web.port",
@@ -46,7 +47,12 @@ MASKED_VALUE = "•" * 8
 
 
 def _validate_type(key: str, value: str | None) -> None:
-    if key in ("reg.headless", "browser.geoip", "proxy.enabled") and value is not None:
+    if key in (
+        "reg.headless",
+        "browser.geoip",
+        "proxy.enabled",
+        "mail.gmail.alias_enabled",
+    ) and value is not None:
         if value not in ("0", "1", "true", "false", "yes", "no", "on", "off"):
             raise ValueError(f"{key} must be bool-like, got {value!r}")
     if key == "web.port" and value is not None:

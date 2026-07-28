@@ -353,6 +353,7 @@ class RegJobManager:
         source: str,
         product_id: str | None,
         alias_limit: int,
+        aliases_enabled: bool,
         profile_region: str,
         headless: bool,
         with_2fa: bool = False,
@@ -367,6 +368,8 @@ class RegJobManager:
             raise ValueError("rental_count must be a positive integer")
         if not isinstance(alias_limit, int) or alias_limit < 1:
             raise ValueError("alias_limit must be a positive integer")
+        if type(aliases_enabled) is not bool:
+            raise ValueError("aliases_enabled must be a boolean")
         self._stop_all.clear()
         rental_ids = [uuid.uuid4().hex for _ in range(rental_count)]
         pending: queue.Queue[str] = queue.Queue()
@@ -398,6 +401,7 @@ class RegJobManager:
                     source,
                     product_id,
                     alias_limit,
+                    aliases_enabled,
                     profile_region,
                     headless,
                     with_2fa,
@@ -419,6 +423,7 @@ class RegJobManager:
         source: str,
         product_id: str | None,
         alias_limit: int,
+        aliases_enabled: bool,
         profile_region: str,
         headless: bool,
         with_2fa: bool,
@@ -445,6 +450,7 @@ class RegJobManager:
                         source=source,
                         product_id=product_id,
                         alias_limit=alias_limit,
+                        aliases_enabled=aliases_enabled,
                         profile_region=profile_region,
                         reg_mode=reg_mode,
                         execute=lambda row, mailbox: self._run_one(

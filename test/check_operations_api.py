@@ -193,6 +193,8 @@ def main() -> int:
             failures.append(f"Gmail start failed: {gmail.status_code} {gmail.text}")
         elif not manager.rental_calls or manager.rental_calls[-1].get("profile_region") != "ko":
             failures.append(f"Gmail start payload was not forwarded: {manager.rental_calls!r}")
+        elif manager.rental_calls[-1].get("aliases_enabled") is not False:
+            failures.append("Gmail alias generation is not disabled by default")
 
         accstack = client.post(
             "/api/jobs/start",
@@ -209,6 +211,8 @@ def main() -> int:
             failures.append(f"AccStack start failed: {accstack.status_code} {accstack.text}")
         elif manager.rental_calls[-1].get("product_id") != "5":
             failures.append("single AccStack Gmail product was not auto-selected")
+        elif manager.rental_calls[-1].get("aliases_enabled") is not False:
+            failures.append("AccStack Gmail alias generation is not disabled")
 
         retry_job_id = "gmail-retry-api"
         repositories["rentals_repo"].create(

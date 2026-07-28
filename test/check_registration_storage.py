@@ -111,6 +111,7 @@ def _check_schema_and_settings(
     values = {
         "proxy.enabled": "true",
         "accstack.api_key": "accstack-secret",
+        "mail.gmail.alias_enabled": "false",
         "mail.smsbower.alias_limit": "3",
         "mail.accstack.alias_limit": "4",
         "sms.smsbower.api_key": "smsbower-secret",
@@ -127,6 +128,7 @@ def _check_schema_and_settings(
             failures.append(f"settings {key} khong duoc masked")
     for key in (
         "proxy.enabled",
+        "mail.gmail.alias_enabled",
         "mail.smsbower.alias_limit",
         "mail.accstack.alias_limit",
     ):

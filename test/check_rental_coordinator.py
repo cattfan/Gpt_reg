@@ -84,6 +84,7 @@ def _check_manager_integration(failures: list[str]) -> None:
             source="gmail_smsbower",
             product_id=None,
             alias_limit=5,
+            aliases_enabled=True,
             profile_region="ko",
             headless=True,
             reg_mode="http",
@@ -210,6 +211,7 @@ def main() -> int:
             source="gmail_smsbower",
             product_id=None,
             alias_limit=5,
+            aliases_enabled=True,
             profile_region="vi",
             reg_mode="http",
             execute=execute,
@@ -260,6 +262,7 @@ def main() -> int:
             source="gmail_accstack",
             product_id="5",
             alias_limit=1,
+            aliases_enabled=True,
             profile_region="in",
             reg_mode="browser",
             execute=lambda row, mailbox: SignupResult(
@@ -275,6 +278,47 @@ def main() -> int:
             failures.append(f"alias limit was not enforced: {limited!r} {row!r}")
         if provider.prepared:
             failures.append("provider prepared another code after final alias")
+    finally:
+        conn.close()
+
+    conn, jobs, rentals = _fresh_repositories()
+    provider = _FakeProvider()
+    base_emails: list[str] = []
+    try:
+        try:
+            base_only = RentalCoordinator().run_rental(
+                rental_id="rental-base-only",
+                provider=provider,
+                rentals_repo=rentals,
+                jobs_repo=jobs,
+                source="gmail_smsbower",
+                product_id=None,
+                alias_limit=5,
+                aliases_enabled=False,
+                profile_region="vi",
+                reg_mode="http",
+                execute=lambda row, mailbox: (
+                    base_emails.append(row["email"])
+                    or SignupResult(ok=True, email=row["email"], outcome="success")
+                ),
+                should_cancel=lambda: False,
+                balance_before=1000,
+            )
+        except TypeError as exc:
+            failures.append(f"coordinator does not support disabling aliases: {exc}")
+        else:
+            row = jobs.get(base_only[0]) if base_only else None
+            rental = rentals.get("rental-base-only")
+            if base_emails != ["base@gmail.com"] or not row or row["email"] != "base@gmail.com":
+                failures.append(f"disabled aliases did not use the base email: {base_emails!r} {row!r}")
+            elif row.get("alias_index") is not None:
+                failures.append(f"base email was marked as an alias: {row!r}")
+            if len(base_only) != 1 or provider.prepared:
+                failures.append(
+                    f"disabled aliases reused the rental: jobs={base_only!r} prepared={provider.prepared!r}"
+                )
+            if not rental or rental["alias_count"] != 1:
+                failures.append(f"base-email rental count is wrong: {rental!r}")
     finally:
         conn.close()
 

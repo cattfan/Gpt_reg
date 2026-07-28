@@ -71,14 +71,21 @@ def _create_rental(rentals, *, rental_id: str, expires_at: str | None) -> None:
     )
 
 
-def _create_job(jobs, *, job_id: str, rental_id: str | None) -> None:
+def _create_job(
+    jobs,
+    *,
+    job_id: str,
+    rental_id: str | None,
+    email: str = "base+alias1@gmail.com",
+    alias_index: int | None = 1,
+) -> None:
     from gpt_reg.fingerprint import new_seed, profile_for_seed
 
     fingerprint_seed = new_seed()
     jobs.create(
         {
             "id": job_id,
-            "email": "base+alias1@gmail.com",
+            "email": email,
             "combo": "not-an-outlook-combo",
             "mail_mode": "gmail_smsbower",
             "reg_mode": "http",
@@ -91,7 +98,7 @@ def _create_job(jobs, *, job_id: str, rental_id: str | None) -> None:
             "fingerprint_data": None,
             "rental_id": rental_id,
             "source_email": "base@gmail.com",
-            "alias_index": 1,
+            "alias_index": alias_index,
             "profile_region": "ko",
             "profile_name": "Kim Min-jun",
             "birthdate": "1997-05-12",
@@ -102,13 +109,24 @@ def _create_job(jobs, *, job_id: str, rental_id: str | None) -> None:
     )
 
 
-def _check_reuses_existing_rental(failures: list[str]) -> None:
+def _check_reuses_existing_rental(
+    failures: list[str],
+    *,
+    email: str,
+    alias_index: int | None,
+) -> None:
     from gpt_reg.models import SignupResult
     from gpt_reg.web.jobs import reg_manager as manager_module
 
     conn, jobs, rentals = _repositories()
     _create_rental(rentals, rental_id="rental-1", expires_at="2099-01-01T00:00:00Z")
-    _create_job(jobs, job_id="gmail-job-1", rental_id="rental-1")
+    _create_job(
+        jobs,
+        job_id="gmail-job-1",
+        rental_id="rental-1",
+        email=email,
+        alias_index=alias_index,
+    )
     original = jobs.get("gmail-job-1")
     jobs.append_log("gmail-job-1", "old retry log")
     provider = _ExistingRentalProvider()
@@ -175,13 +193,13 @@ def _check_reuses_existing_rental(failures: list[str]) -> None:
             failures.append(f"retry made {len(signup_calls)} signup attempts")
         else:
             request, mailbox = signup_calls[0]
-            if request.email != "base+alias1@gmail.com" or request.outlook_combo is not None:
+            if request.email != email or request.outlook_combo is not None:
                 failures.append("Gmail retry was parsed as an Outlook combo")
             if request.name != "Kim Min-jun" or request.birthdate != "1997-05-12":
                 failures.append("Gmail retry did not reuse profile identity")
             if mailbox is None:
                 failures.append("Gmail retry did not provide a rental mailbox bridge")
-        if provider.waited_aliases != ["base+alias1@gmail.com"]:
+        if provider.waited_aliases != [email]:
             failures.append(f"retry polled the wrong alias: {provider.waited_aliases!r}")
         if provider.billable_calls:
             failures.append(f"retry made billable/lifecycle calls: {provider.billable_calls!r}")
@@ -231,7 +249,16 @@ def _check_invalid_rentals_fail_before_mutation(failures: list[str]) -> None:
 
 def main() -> int:
     failures: list[str] = []
-    _check_reuses_existing_rental(failures)
+    _check_reuses_existing_rental(
+        failures,
+        email="base+alias1@gmail.com",
+        alias_index=1,
+    )
+    _check_reuses_existing_rental(
+        failures,
+        email="base@gmail.com",
+        alias_index=None,
+    )
     _check_invalid_rentals_fail_before_mutation(failures)
     for failure in failures:
         print(f"[fail] {failure}")

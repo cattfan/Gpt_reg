@@ -72,6 +72,7 @@ def _shared_connection(settings: Settings):
                 {
                     "proxy.enabled": "false",
                     "mail_mode.provider": "outlook",
+                    "mail.gmail.alias_enabled": "false",
                     "mail.smsbower.alias_limit": "1",
                     "mail.accstack.alias_limit": "1",
                     "browser.geoip": "true" if settings.browser_geoip else "false",
