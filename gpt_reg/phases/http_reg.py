@@ -372,6 +372,9 @@ def _step_oauth_init(session, auth_url: str, log: Callable) -> tuple[str, str]:
 def classify_landing(landing_url: str) -> str:
     """`login` | `register` | `otp` | `unknown` từ URL đích của GET authorize."""
     url = (landing_url or "").lower()
+    host = urlparse(url).netloc
+    if host and host != "auth.openai.com":
+        return "external"
     if "/log-in/password" in url:
         return "login"
     if "/create-account/password" in url:
@@ -381,6 +384,19 @@ def classify_landing(landing_url: str) -> str:
     return "unknown"
 
 
+def _is_base_gmail_address(email: str) -> bool:
+    local, sep, domain = (email or "").strip().lower().partition("@")
+    return bool(sep and domain in {"gmail.com", "googlemail.com"} and "+" not in local)
+
+
+def _raise_external_identity(email: str = "") -> None:
+    if _is_base_gmail_address(email):
+        message = "Gmail gốc bị route sang SSO; HTTP password signup không áp dụng. Bật +alias hoặc dùng mail khác."
+    else:
+        message = "Email bị route sang SSO ngoài; HTTP password signup không áp dụng cho state này."
+    raise HttpRegError(message, step="external_identity")
+
+
 def _bootstrap_with_profile_rotation(
     proxy: str | None,
     log: Callable,
@@ -388,6 +404,7 @@ def _bootstrap_with_profile_rotation(
     fingerprint_seed: str,
     preferred_profile: str | None = None,
     login_hint: str = "",
+    screen_hint: str = "login_or_signup",
 ) -> tuple[Any, str, str, str]:
     """Bootstrap, xoay **cả bộ vân tay** khi bị CF chặn hoặc TLS lỗi.
 
@@ -413,7 +430,14 @@ def _bootstrap_with_profile_rotation(
             if idx > 0:
                 log(f"[http] đổi vân tay → {profile.name} ({profile.impersonate})")
             csrf = _step_csrf(session, log)
-            auth_url = _step_auth_url(session, csrf, log, device_id=device_id, login_hint=login_hint)
+            auth_url = _step_auth_url(
+                session,
+                csrf,
+                log,
+                device_id=device_id,
+                login_hint=login_hint,
+                screen_hint=screen_hint,
+            )
         except Exception as exc:
             last_exc = exc
             try:
@@ -457,13 +481,14 @@ def _step_authorize_continue(
 ) -> dict:
     """POST authorize/continue — đưa email vào state machine.
 
-    **KHÔNG dùng trong luồng đăng ký.** Browser không gọi bước này (đã bắt
-    request để xác nhận), và gọi nó khiến server chuyển sang nhánh
-    `email_otp_verification` (passwordless) — lúc đó `user/register` bị từ chối
-    bằng 400 `invalid_auth_step`. Giữ lại cho các luồng đăng nhập/khôi phục
-    sau này có thể cần.
+    Không dùng để chuyển đăng ký sang password. Browser không gọi bước này
+    trước `user/register` (đã bắt request để xác nhận), và với mail email-signup
+    bình thường nó có thể đưa server sang `email_otp_verification`
+    (passwordless), khiến `user/register` bị từ chối bằng 400
+    `invalid_auth_step`. Chỉ dùng cho preflight Gmail gốc để phát hiện
+    `external_url` và dừng sớm trước khi lặp 409 `invalid_state`.
     """
-    log("[http] [3.5/9] authorize/continue (đưa email vào state machine)")
+    log("[http] [4.5/10] authorize/continue (đưa email vào state machine)")
     sentinel = _get_sentinel_token(session, device_id, "authorize_continue", log, worker=worker)
     headers = _common_headers(session, "https://auth.openai.com/create-account")
     headers["Content-Type"] = "application/json"
@@ -952,6 +977,16 @@ def _run_flow(
     needs_otp_after_login = False
     needs_details = False    # account nửa chừng → vẫn phải gọi create_account
 
+    # login_hint của địa chỉ Gmail thật sẽ chuyển OAuth sang Google SSO. Với
+    # lượt thuê mới, đi thẳng nhánh email signup; retry đã có mật khẩu vẫn dùng
+    # account discovery để tiếp tục phiên cũ.
+    fresh_rented_gmail = (
+        request.mail_provider in ("gmail_smsbower", "gmail_accstack")
+        and not request.password
+    )
+    bootstrap_login_hint = "" if fresh_rented_gmail else request.email
+    bootstrap_screen_hint = "signup" if fresh_rented_gmail else "login_or_signup"
+
     # Bootstrap + register, retry re-bootstrap trên 409 invalid_state.
     max_register_attempts = 3
     for register_attempt in range(1, max_register_attempts + 1):
@@ -964,7 +999,8 @@ def _run_flow(
             log,
             fingerprint_seed=request.fingerprint_seed,
             preferred_profile=request.fingerprint_profile,
-            login_hint=request.email,
+            login_hint=bootstrap_login_hint,
+            screen_hint=bootstrap_screen_hint,
         )
         sessions.append(session)
 
@@ -973,6 +1009,8 @@ def _run_flow(
         # `invalid_auth_step` (tốn một vòng và một lần sentinel).
         landing_kind = classify_landing(landing)
         log(f"[http] landing={landing_kind} ({landing.split('?')[0][:70]})")
+        if landing_kind == "external":
+            _raise_external_identity(request.email)
         if landing_kind == "login":
             # Màn nhập mật khẩu → xác thực bằng mật khẩu đã biết.
             log("[http] [5/10] identify existing account (password)")
@@ -991,6 +1029,21 @@ def _run_flow(
             needs_otp_after_login = True
             reg_continue = landing
             break
+
+        if fresh_rented_gmail and _is_base_gmail_address(request.email):
+            # Gmail gốc được server home-realm-discovery sang Google SSO sau khi
+            # đưa username vào state machine. Không có bước password-register để
+            # chạy tiếp bằng HTTP mailbox OTP; chặn sớm thay vì POST register rồi
+            # lặp 409 invalid_state 3 lần.
+            log("[http] [4.5/10] kiểm tra route Gmail gốc")
+            discovery = _step_authorize_continue(session, request.email, device_id, log, worker=worker)
+            page_type = ((discovery.get("page") or {}).get("type") or "").strip()
+            if page_type == "external_url":
+                _raise_external_identity(request.email)
+            raise HttpRegError(
+                f"Gmail gốc trả page_type={page_type!r}; dừng trước user/register để tránh invalid_state",
+                step="external_identity",
+            )
 
         # Bám sát đúng những gì browser làm (bắt được bằng
         # `test/probe_browser_capture.py`), vì đó là biến thể duy nhất server
